@@ -1,6 +1,0 @@
-{
-    "python.analysis.extraPaths": [
-        "./3rdparty/lmms-eval",
-        "./3rdparty/LLaVA-NeXT",
-    ]
-}

@@ -76,7 +76,7 @@ def pseudo_quantize_model_weight(
             )
             # m.cpu()
 
-
+#下面是MBQ相比于AWQ增加的
 def get_module_by_name_suffix(model, module_name: str):
     for name, module in model.named_modules():
         if name.endswith(module_name):

@@ -84,7 +84,8 @@ def scale_gelu_fc(gelu, fc, scales):
     for p in fc.parameters():
         assert torch.isnan(p).sum() == 0
 
-
+# MBQ新增的参数：vis_mask, reweight_ratio_dict, loss_mode="mae"
+# 内部函数几乎都增加了 reweight_ratio参数，其他没怎么变化
 @torch.no_grad()
 def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mask, vis_mask, reweight_ratio_dict, loss_mode="mae"):
 
@@ -154,7 +155,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
                         loss = (
                             (org_out - out).float().pow(2).mean().item()
                         ) 
-                elif ans_mask is not None and vis_mask is None:
+                elif ans_mask is not None and vis_mask is None: #和AWQ的代码一样
                     ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
                     masked_diff = ((org_out - out).float().pow(2) * ans_mask_expand)
                     loss = masked_diff.sum() / ans_mask_expand.sum() 
@@ -162,7 +163,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
                     loss = (
                         (org_out - out).float().pow(2).mean().item()
                     )  # float prevents overflow
-            elif loss_mode == "mae":
+            elif loss_mode == "mae": #MBQ增加的loss计算方式
                 if ans_mask is not None and vis_mask is not None:
                     ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
                     vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
@@ -579,7 +580,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
             )
         )
     
-    elif module.__class__.__name__ == "Qwen2VLDecoderLayer":
+    elif module.__class__.__name__ == "Qwen2VLDecoderLayer": #新加的Qwen2vl处理模块
         # attention input
         scales_list.append(
             _auto_get_scale(
@@ -644,6 +645,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         if isinstance(prev_op, nn.Linear):
             assert len(layers) == 1
             scale_fc_fc(prev_op, layers[0], scales)
+        # 这里修改了 Qwen2RMSNorm的 判断
         elif isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm)) or prev_op.__class__.__name__ == "InternLM2RMSNorm" or prev_op.__class__.__name__ == "Qwen2RMSNorm":
             scale_ln_fcs(prev_op, layers, scales)
         elif isinstance(prev_op, (nn.GELU, BloomGelu, GELUActivation)):

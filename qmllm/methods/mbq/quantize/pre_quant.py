@@ -24,9 +24,10 @@ from qmllm.quantization.quant_funcs import pseudo_quantize_tensor
 from .quantizer import get_module_by_name_suffix
 
 
+# MBQ新增多模态输入、重加权和权重-激活量化入口
 __all__ = ["run_mbq"]
 
-
+# MBQ新增的
 class GradCacheHook:
     def __init__(self, vis_masks, cap_masks):
         if vis_masks is None or cap_masks is None:
@@ -108,7 +109,7 @@ class GradCacheHook:
 def get_named_linears(module):
     return {name: m for name, m in module.named_modules() if isinstance(m, nn.Linear)}
 
-
+# MBQ:增加一些qwen2vl,llava的处理模块
 def get_blocks(model):
     if model.__class__.__name__ == "LlamaForCausalLM":
         layers = model.model.layers
@@ -141,7 +142,7 @@ def get_blocks(model):
         raise NotImplementedError(type(model))
     return layers
 
-
+# MBQ:增加一些qwen2vl,llava的处理模块
 def move_embed(model, device):
     if isinstance(model, LlamaForCausalLM):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
@@ -186,7 +187,7 @@ def move_embed(model, device):
     else:
         raise NotImplementedError(type(model))
 
-
+# MBQ：完全新增
 def process_input(prompt_inputs, prompt_kwargs):
     inputs = {**prompt_inputs, **prompt_kwargs}
     inputs["use_cache"] = False
@@ -202,9 +203,10 @@ def run_mbq(
     prompt_inputs,
     prompt_kwargs,
     w_bit,
-    a_bit,
+    a_bit, #新增
     q_config,
     auto_scale=True,
+    # 以下参数都新增
     loss_mode="mae",
     wa_quant=False,
     reweight=False,
@@ -237,7 +239,7 @@ def run_mbq(
 
     # patch layer 0 to catch input and kwargs
     layers[0] = Catcher(layers[0])
-
+    # =======MBQ：新增
     inputs, vision_mask, caption_mask = process_input(prompt_inputs, prompt_kwargs)
 
     model.to_cuda()
@@ -247,6 +249,7 @@ def run_mbq(
         pass
 
     model.to_cpu()
+    # =========新增结束
     layers[0] = layers[0].module  # restore
     inps = inps[0]
     layer_kwargs["use_cache"] = False
@@ -261,7 +264,7 @@ def run_mbq(
         "scale": [],
     }
 
-
+    # ===========MBQ:下面reweight和distort都是新增
     if reweight:
         model.to_cuda()
         print("Save gradient...")
@@ -312,7 +315,7 @@ def run_mbq(
 
     gc.collect()
     torch.cuda.empty_cache()
-
+    # ============新增结束
     # solve layer by layer
     for i in tqdm.tqdm(range(len(layers)), desc="Running MBQ..."):
         layer = layers[i]
@@ -335,11 +338,11 @@ def run_mbq(
             )
         inps = inps.to(next(layer.parameters()).device)  # in case multi-gpu
         # get output as next layer's input
-
+        # =====MBQ:新增
         for k in layer_kwargs:
             if isinstance(layer_kwargs[k], torch.Tensor):
                 layer_kwargs[k] = layer_kwargs[k].to(next(layer.parameters()).device)
-
+        # ========新增结束
         inps = layer(inps, **layer_kwargs)[0]
         for h in handles:
             h.remove()
@@ -348,7 +351,7 @@ def run_mbq(
 
         # Clear GPU memory
         torch.cuda.empty_cache()
-
+        # =======新增
         if reweight:
             scale_reweight_ratio_dict = {}
             for key, value in grad_avg_dict.items():
@@ -363,10 +366,11 @@ def run_mbq(
                 "attn": None,
                 "mlp": None
             }
-
+        # =======新增结束
         if (
             auto_scale
         ):  # if it applies, we should also modify the input_feat with scales
+            # ===========新增
             if not reweight:
                 ans_mask = None
                 vis_mask = None
@@ -416,6 +420,7 @@ def run_mbq(
                         q_input=inps_distort,
                         loss_mode=loss_mode
                     )
+                # =========新增结束
                 else:
                     scales_list = auto_scale_block(
                         layer,
@@ -424,6 +429,7 @@ def run_mbq(
                         q_config=q_config,
                         input_feat=input_feat,
                         ans_mask=ans_mask,
+                        # 新增参数
                         vis_mask=vis_mask,
                         reweight_ratio_dict=scale_reweight_ratio_dict,
                         loss_mode=loss_mode
@@ -431,7 +437,7 @@ def run_mbq(
 
             # apply_scale(layer, scales_list, input_feat_dict=input_feat)
             apply_scale(layers[i], scales_list, input_feat_dict=input_feat)
-
+            # =========新增
             if distort:
                 # get distort output as next layer's input
                 if wa_quant:
@@ -459,7 +465,7 @@ def run_mbq(
                     inps_distort = inps_distort.to(next(layer_q.parameters()).device)  # in case multi-gpu
                     inps_distort = layer_q(inps_distort, **layer_kwargs)[0]
                     del layer_q 
-
+            # ===========新增结束
             # append prefix to make names global
             mbq_results["scale"] += append_str_prefix(
                 scales_list, get_op_name(model.model, layer) + "."

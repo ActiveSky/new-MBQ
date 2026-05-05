@@ -17,10 +17,12 @@
     # Install LLaVA-NeXT
     cd ./3rdparty/LLaVA-NeXT
     pip install -e .
+    cd ../..
 
     # Install lmms-eval
     cd ./3rdparty/lmms-eval
     pip install -e .
+    cd ../..
 
     # Install qmllm
     pip install -r requirements.txt

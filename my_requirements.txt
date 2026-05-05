@@ -2,7 +2,7 @@
 # torch>=2.0
 # torchvision
 xopen
-anthropic
+# anthropic
 
 # huggingface requirements
 accelerate>=0.21.0
@@ -25,7 +25,7 @@ einops
 seaborn
 
 # for conversation tasks
-anthropic
+# anthropic
 openai==0.28
 fschat
 

@@ -1,6 +1,6 @@
 # model args
 model: internvl2
-model_args: pretrained=OpenGVLab/InternVL2-2B
+model_args: pretrained=OpenGVLab/InternVL2-8B
 
 # calibration data args
 calib_data: coco
@@ -14,13 +14,13 @@ text_data_path: "" # You should specify this arg if you want to use interleave_f
 # quantization config
 method: mbq
 run_process: True
-w_bit: 3
-w_group: 128
+w_bit: 2
+w_group: 64
 distort: False # if True, use distort feature map during scale search process
 reweight: True # if True, use avg gradient to reweight the loss of each modality
 loss_mode: mae 
 
 # output args
-scale_path: scale_cache/mbq/internvl2_2b_w3g128.pt
+scale_path: scale_cache/mbq/internvl2_8b_w2g64.pt
 
 

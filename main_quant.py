@@ -1,3 +1,12 @@
+"""MBQ 量化搜索入口脚本。
+
+整体流程与 README 中的说明保持一致：
+1. 解析命令行参数或 YAML 配置；
+2. 按 `model` 加载对应的多模态模型；
+3. 根据 `calib_data` 构建文本或图文校准集；
+4. 调用 `qwrapper` 执行量化搜索、伪量化或相关处理。
+"""
+
 import argparse
 import datetime
 import importlib
@@ -24,6 +33,10 @@ from qmllm.calibration.coco_vl import get_multimodal_calib_dataset
 
 
 def parse_quant_args() -> argparse.Namespace:
+    """解析量化搜索所需的命令行参数。
+
+    该入口同时支持直接命令行传参和后续通过 `--config` 覆盖参数。
+    """
     parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--config", default="", help="Path to a yaml file specifying all eval arguments, will ignore cli arguments if specified")
     parser.add_argument("--model", default="hf", help="Name of model e.g. `hf`")
@@ -72,7 +85,13 @@ def parse_quant_args() -> argparse.Namespace:
 
 
 def cli_quant(args: Union[argparse.Namespace, None] = None) -> None:
+    """量化搜索的总入口。
+
+    如果外部没有传入 `args`，就从命令行解析；如果指定了 YAML 配置，
+    则会把配置文件中的每一组参数展开成一次独立的量化任务。
+    """
     if not args:
+        # 允许直接运行脚本时从命令行读取参数。
         args = parse_quant_args()
 
     args_list = []
@@ -83,7 +102,7 @@ def cli_quant(args: Union[argparse.Namespace, None] = None) -> None:
         with open(args.config, "r") as file:
             config_args = yaml.safe_load(file)
         config_args = [config_args] if type(config_args) != list else config_args
-        # multiple configs, create args list first
+        # YAML 里可以写单个配置，也可以写多个配置列表；这里统一展开成多个任务。
         for config in config_args:
             args_copy = argparse.Namespace(**vars(args))
             for key, value in config.items():
@@ -97,10 +116,15 @@ def cli_quant(args: Union[argparse.Namespace, None] = None) -> None:
 
 
 def cli_quant_single(args: Union[argparse.Namespace, None] = None) -> None:
-    # here we load MLLMs outside of the evaluator.
+    """执行一次完整的量化流程。
+
+    这里先在 evaluator 外部完成模型加载和校准数据构建，
+    方便在量化前拿到原始的多模态模型、tokenizer 和 processor。
+    """
     if args.model_args is None:
         args.model_args = ""
-    
+
+    # 先根据 `model` 选择 lmms-eval 中对应的模型封装并加载基座模型。
     ModelClass = get_model(args.model)
     lm = ModelClass.create_from_arg_string(
         args.model_args,
@@ -110,13 +134,13 @@ def cli_quant_single(args: Union[argparse.Namespace, None] = None) -> None:
         },
     )
 
-    # Preprocess the MLLM here, use "lm._model" to get the fp16 mllm.
+    # 再根据具体模型类型构造预处理器，后续校准和量化都依赖这个包装后的模型。
     Process_ModelClass = get_process_model(args.model)
     process_model = Process_ModelClass(lm._model, 
                                        lm._tokenizer, 
                                        lm.processor if hasattr(lm, 'processor') else None)
 
-    # Generate the calibration tokens.
+    # 根据配置生成校准数据：pileval 走纯文本，coco 走多模态样本。
     prompt_inputs = None
     prompt_kwargs = None
 
@@ -131,7 +155,7 @@ def cli_quant_single(args: Union[argparse.Namespace, None] = None) -> None:
                                                                     interleave_format=args.interleave_format,
                                                                     text_data_path=args.text_data_path)
 
-    # Wrapper the quantized model.
+    # 最后交给量化包装器，执行搜索、伪量化或结果保存等逻辑。
     qwrapper(process_model, prompt_inputs, prompt_kwargs, args)
 
     

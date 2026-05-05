@@ -122,7 +122,8 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
         best_ratio = -1
         best_scales = None
 
-        n_grid = 20
+        # n_grid = 20
+        n_grid = 50 # for  2bit model quantization
         history = []
 
         org_sd = {k: v.cpu() for k, v in block.state_dict().items()}

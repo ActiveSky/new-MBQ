@@ -1,12 +1,12 @@
 # model args
 model: internvl2
-model_args: pretrained="OpenGVLab/InternVL2-8B"
+model_args: pretrained=OpenGVLab/InternVL2-8B
 
 # calibration data args
 calib_data: coco
 n_samples: 128
-data_path: "your/coco/caption/path"
-image_folder: "your/coco/image/folder"
+data_path: "my-datasets/coco/data.json"
+image_folder: "my-datasets"
 few_shot_format: False # if True, concat two samples to simulate few shot
 interleave_format: False # if True, insert pure text data between two image-text pairs to simulate interleave data
 text_data_path: "" # You should specify this arg if you want to use interleave_format 

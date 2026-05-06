@@ -5,7 +5,7 @@ from qmllm.methods.mbq.quantize.pre_quant import run_mbq, apply_mbq
 from qmllm.methods.mbq.quantize.quantizer import pseudo_quantize_model_weight, pseudo_quantize_model_weight_act
 
 
-def mbq_entry(model, prompt_inputs, prompt_kwargs, run_mbq_process: bool, pseudo_quant: bool, scale_path: str=None, zero_point: str=True, q_group_size: int=128, w_bit: int=4, a_bit: int=16, wa_quant: bool=False, reweight: bool=False, distort: bool=False, loss_mode: str="mae"):
+def mbq_entry(model, prompt_inputs, prompt_kwargs, run_mbq_process: bool, pseudo_quant: bool, scale_path: str=None, zero_point: str=True, q_group_size: int=128, w_bit: int=4, a_bit: int=16, wa_quant: bool=False, reweight: bool=False, distort: bool=False, loss_mode: str="mae", smooth: bool=False, smooth_alpha: float=0.5):
     '''
     model: here the model is the LLM, you have to extract the LLM first! 
     prompt_tokens: the prompt tokens
@@ -35,6 +35,8 @@ def mbq_entry(model, prompt_inputs, prompt_kwargs, run_mbq_process: bool, pseudo
             wa_quant=wa_quant,
             reweight=reweight,
             distort=distort,
+            smooth=smooth,
+            smooth_alpha=smooth_alpha,
         )
         
         dirpath = os.path.dirname(scale_path)
@@ -42,7 +44,9 @@ def mbq_entry(model, prompt_inputs, prompt_kwargs, run_mbq_process: bool, pseudo
         
         torch.save(mbq_results, scale_path)
         print("MBQ results saved at", scale_path)
-
+    else:
+        print(f"MBQ scale file already exists at {scale_path}, skipping MBQ process and loading the scale directly.")
+    
     if pseudo_quant:
         mbq_results = torch.load(scale_path, map_location="cpu")
         apply_mbq(model.model, mbq_results)

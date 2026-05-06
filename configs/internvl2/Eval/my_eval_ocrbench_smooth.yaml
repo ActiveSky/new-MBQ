@@ -12,10 +12,10 @@ log_samples_suffix: ocrbench
 method: mbq
 run_process: False # You don't need to run scale search, load the scale directly
 pseudo_quant: True # if True, conduct pseudo quantization on the model, otherwise the model will stay in fp16
-scale_path: scale_cache/mbq/internvl2_8b_w2g128.pt
+scale_path: scale_cache/mbq/internvl2_8b_w2g128_smooth.pt
 w_bit: 2
 w_group: 128
 
 # output args
-output_path: outputs/my-internvl2-8b/
+output_path: outputs/my-internvl2-8b/smooth
 

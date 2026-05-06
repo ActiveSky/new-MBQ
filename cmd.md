@@ -6,6 +6,7 @@ flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64
 
 ### 8b模型
 
+```bash
 ps -ef | grep main.py | grep -v grep
 
 CUDA_VISIBLE_DEVICES=6 \
@@ -27,17 +28,13 @@ python3 -W ignore main.py \
     --config configs/internvl2/Eval/my_eval.yaml \
     > 8b_eval_out_ocrbench_w2g32.log 2>&1  &
 
-CUDA_VISIBLE_DEVICES=5 \
-nohup \
-python3 -W ignore main.py \
-    --config configs/internvl2/Eval/my_eval.yaml \
-    > 8b_eval_out_textvqa_w2.log 2>&1  &
 
 CUDA_VISIBLE_DEVICES=3 \
 nohup \
 python3 -W ignore main.py \
     --config configs/internvl2/Eval/my_eval_textvqa.yaml \
     > 8b_eval_out_textvqa_w2g32.log 2>&1  &
+```
 
 ### 2b模型测试
 
@@ -53,10 +50,6 @@ python3 -W ignore main.py \
     --config configs/my-internvl2-2b/Eval/eval.yaml \
     > eval_out.log 2>&1  &
 
-
-
-python3 -W ignore main_quant.py \
-    --config configs/internvl2/MBQ_search/my_1b_weight_only.yaml
 
 
 

@@ -22,7 +22,9 @@ def qwrapper(model, prompt_inputs, prompt_kwargs, args):
                                 wa_quant=wa_quant, 
                                 reweight=args.reweight,
                                 distort=args.distort,
-                                loss_mode=args.loss_mode)
+                                loss_mode=args.loss_mode,
+                                smooth=args.smooth,
+                                smooth_alpha=args.smooth_alpha)
     elif args.method == "rtn":
         wa_quant = args.w_bit < 16 and args.a_bit < 16
         model = rtn_entry(model, pseudo_quant=args.pseudo_quant, wa_quant=wa_quant, q_group_size=args.w_group, w_bit=args.w_bit, a_bit=args.a_bit)

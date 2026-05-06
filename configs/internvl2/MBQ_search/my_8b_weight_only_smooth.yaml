@@ -1,0 +1,28 @@
+# model args
+model: internvl2
+model_args: pretrained=OpenGVLab/InternVL2-8B
+
+# calibration data args
+calib_data: coco
+n_samples: 128
+data_path: "my-datasets/coco/data.json"
+image_folder: "my-datasets"
+few_shot_format: False # if True, concat two samples to simulate few shot
+interleave_format: False # if True, insert pure text data between two image-text pairs to simulate interleave data
+text_data_path: "" # You should specify this arg if you want to use interleave_format 
+
+# quantization config
+method: mbq
+run_process: True
+w_bit: 2
+w_group: 128
+distort: False # if True, use distort feature map during scale search process
+reweight: True # if True, use avg gradient to reweight the loss of each modality
+loss_mode: mae
+smooth: True # if True, use smooth loss to search better scale for quantization
+smooth_alpha: 0.5 # the alpha for smooth loss, the final loss = alpha * smooth_loss + (1 - alpha) * mae_loss
+
+# output args
+scale_path: scale_cache/mbq/internvl2_8b_w2g128_smooth.pt
+
+

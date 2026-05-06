@@ -18,7 +18,7 @@ from qmllm.utils.search import append_str_prefix, get_op_name
 from qmllm.methods.mbq.quantize.auto_scale_wa_distort import auto_scale_block_wa_distort
 from qmllm.methods.mbq.quantize.auto_scale_wa import auto_scale_block_wa
 from qmllm.methods.mbq.quantize.auto_scale_distort import auto_scale_block_distort
-from qmllm.methods.mbq.quantize.auto_scale import auto_scale_block, apply_scale
+from qmllm.methods.mbq.quantize.auto_scale import auto_scale_block, apply_scale, scale_ln_fcs, scale_fc_fc
 from qmllm.quantization.qlinear import WALinear
 from qmllm.quantization.quant_funcs import pseudo_quantize_tensor
 from .quantizer import get_module_by_name_suffix
@@ -26,6 +26,148 @@ from .quantizer import get_module_by_name_suffix
 
 # MBQ新增多模态输入、重加权和权重-激活量化入口
 __all__ = ["run_mbq"]
+
+# ========== SmoothQuant-style smoothing helpers ==========
+
+@torch.no_grad()
+def _compute_smooth_scales(act, weight, alpha=0.5):
+    """Compute SmoothQuant smoothing scales per channel.
+    S_j = (max(|X_j|))^alpha / (max(|W_j|))^(1-alpha)
+    """
+    act = act.to(weight.device)
+    act_max = act.abs().view(-1, act.shape[-1]).amax(dim=0).float()
+    weight_max = weight.abs().amax(dim=0).float()
+    act_max = act_max.clamp(min=1e-5)
+    weight_max = weight_max.clamp(min=1e-5)
+    scales = act_max.pow(alpha) / weight_max.pow(1 - alpha)
+    scales = scales.clamp(min=1e-5)
+    scales = scales / (scales.max() * scales.min()).sqrt()
+    return scales.to(weight.dtype)
+
+
+@torch.no_grad()
+def _smooth_ln_fcs(ln, fcs, input_feat, fc_names, alpha=0.5):
+    """Apply SmoothQuant smoothing for a group: LN -> [FC1, FC2, ...].
+    SmoothQuant formula: Y = (X/S) * (W*S)
+    """
+    if not isinstance(fcs, list):
+        fcs = [fcs]
+    if not isinstance(fc_names, list):
+        fc_names = [fc_names]
+    first_fc = fcs[0]
+    first_name = fc_names[0]
+    act = input_feat[first_name]
+    weight = first_fc.weight.data
+    S = _compute_smooth_scales(act, weight, alpha=alpha)
+    scale_ln_fcs(ln, fcs, S)
+    S = S.to(input_feat[first_name].device)
+    for name in fc_names:
+        if name in input_feat:
+            input_feat[name] = input_feat[name].div(S.view(1, -1))
+
+
+@torch.no_grad()
+def _smooth_fc_fc(fc1, fc2, input_feat, fc2_name, alpha=0.5):
+    """Apply SmoothQuant smoothing for a FC pair: FC1 -> FC2.
+    FC1 weight[out] /= S, FC2 weight *= S
+    """
+    act = input_feat[fc2_name]
+    weight = fc2.weight.data
+    S = _compute_smooth_scales(act, weight, alpha=alpha)
+    scale_fc_fc(fc1, fc2, S)
+    S = S.to(input_feat[fc2_name].device)
+    if fc2_name in input_feat:
+        input_feat[fc2_name] = input_feat[fc2_name].div(S.view(1, -1))
+
+
+@torch.no_grad()
+def _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=0.5):
+    """Apply SmoothQuant-style smoothing to all Linear groups in one layer.
+    Supports InternLM2DecoderLayer (InternVL2), Qwen2VLDecoderLayer, LlamaDecoderLayer.
+    """
+
+    if layer.__class__.__name__ == "InternLM2DecoderLayer":
+        print(f"Applying SmoothQuant to InternLM2DecoderLayer...", flush=True)
+        # InternVL2: attention_norm -> wqkv (fused QKV)
+        if "attention.wqkv" in named_linears and "attention.wqkv" in input_feat:
+            _smooth_ln_fcs(layer.attention_norm, [named_linears["attention.wqkv"]],
+                          input_feat, ["attention.wqkv"], alpha=smooth_alpha)
+        # InternVL2: wqkv -> wo
+        if ("attention.wo" in named_linears and "attention.wo" in input_feat
+                and "attention.wqkv" in named_linears):
+            _smooth_fc_fc(named_linears["attention.wqkv"], named_linears["attention.wo"],
+                         input_feat, "attention.wo", alpha=smooth_alpha)
+        # InternVL2: ffn_norm -> w1, w3
+        gateup_linears = []
+        gateup_names = []
+        for n in ["feed_forward.w1", "feed_forward.w3"]:
+            if n in named_linears and n in input_feat:
+                gateup_linears.append(named_linears[n])
+                gateup_names.append(n)
+        if gateup_linears:
+            _smooth_ln_fcs(layer.ffn_norm, gateup_linears, input_feat, gateup_names, alpha=smooth_alpha)
+        # InternVL2: w3 -> w2
+        if ("feed_forward.w2" in named_linears and "feed_forward.w2" in input_feat
+                and "feed_forward.w3" in named_linears):
+            _smooth_fc_fc(named_linears["feed_forward.w3"], named_linears["feed_forward.w2"],
+                         input_feat, "feed_forward.w2", alpha=smooth_alpha)
+
+    elif layer.__class__.__name__ == "Qwen2VLDecoderLayer":
+        # Qwen2VL: same structure as Llama
+        qkv_linears = []
+        qkv_names = []
+        for n in ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]:
+            if n in named_linears and n in input_feat:
+                qkv_linears.append(named_linears[n])
+                qkv_names.append(n)
+        if qkv_linears:
+            _smooth_ln_fcs(layer.input_layernorm, qkv_linears, input_feat, qkv_names, alpha=smooth_alpha)
+        if ("self_attn.o_proj" in named_linears and "self_attn.o_proj" in input_feat
+                and hasattr(layer.self_attn, 'v_proj')):
+            _smooth_fc_fc(named_linears["self_attn.v_proj"], named_linears["self_attn.o_proj"],
+                         input_feat, "self_attn.o_proj", alpha=smooth_alpha)
+        gateup_linears = []
+        gateup_names = []
+        for n in ["mlp.gate_proj", "mlp.up_proj"]:
+            if n in named_linears and n in input_feat:
+                gateup_linears.append(named_linears[n])
+                gateup_names.append(n)
+        if gateup_linears:
+            _smooth_ln_fcs(layer.post_attention_layernorm, gateup_linears, input_feat, gateup_names, alpha=smooth_alpha)
+        if ("mlp.down_proj" in named_linears and "mlp.down_proj" in input_feat
+                and "mlp.up_proj" in named_linears):
+            _smooth_fc_fc(named_linears["mlp.up_proj"], named_linears["mlp.down_proj"],
+                         input_feat, "mlp.down_proj", alpha=smooth_alpha)
+
+    elif isinstance(layer, nn.Module) and hasattr(layer, 'input_layernorm'):
+        # Generic Llama-like (LlamaDecoderLayer, etc.)
+        qkv_linears = []
+        qkv_names = []
+        for n in ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]:
+            if n in named_linears and n in input_feat:
+                qkv_linears.append(named_linears[n])
+                qkv_names.append(n)
+        if qkv_linears:
+            _smooth_ln_fcs(layer.input_layernorm, qkv_linears, input_feat, qkv_names, alpha=smooth_alpha)
+        if ("self_attn.o_proj" in named_linears and "self_attn.o_proj" in input_feat
+                and hasattr(layer.self_attn, 'v_proj')):
+            _smooth_fc_fc(named_linears["self_attn.v_proj"], named_linears["self_attn.o_proj"],
+                         input_feat, "self_attn.o_proj", alpha=smooth_alpha)
+        gateup_linears = []
+        gateup_names = []
+        for n in ["mlp.gate_proj", "mlp.up_proj"]:
+            if n in named_linears and n in input_feat:
+                gateup_linears.append(named_linears[n])
+                gateup_names.append(n)
+        if gateup_linears:
+            _smooth_ln_fcs(layer.post_attention_layernorm, gateup_linears, input_feat, gateup_names, alpha=smooth_alpha)
+        if ("mlp.down_proj" in named_linears and "mlp.down_proj" in input_feat
+                and "mlp.up_proj" in named_linears):
+            _smooth_fc_fc(named_linears["mlp.up_proj"], named_linears["mlp.down_proj"],
+                         input_feat, "mlp.down_proj", alpha=smooth_alpha)
+
+    else:
+        print(f"[SmoothQuant] Warning: unsupported layer type {type(layer).__name__}, skipping smoothing for this layer.")
 
 # MBQ新增的
 class GradCacheHook:
@@ -210,7 +352,9 @@ def run_mbq(
     loss_mode="mae",
     wa_quant=False,
     reweight=False,
-    distort=False
+    distort=False,
+    smooth=False,
+    smooth_alpha=0.5,
 ):
     if "bigcode" in str(model.model.__class__).lower():
         # otherwise attention_mask will always be on cpu.
@@ -351,6 +495,12 @@ def run_mbq(
 
         # Clear GPU memory
         torch.cuda.empty_cache()
+
+        # SmoothQuant-style smoothing before scale search
+        if smooth:
+            print(f"Applying SmoothQuant-style smoothing to layer {i}...", flush=True)
+            _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=smooth_alpha)
+
         # =======新增
         if reweight:
             scale_reweight_ratio_dict = {}

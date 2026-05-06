@@ -49,6 +49,7 @@ def _compute_smooth_scales(act, weight, alpha=0.5):
 def _smooth_ln_fcs(ln, fcs, input_feat, fc_names, alpha=0.5):
     """Apply SmoothQuant smoothing for a group: LN -> [FC1, FC2, ...].
     SmoothQuant formula: Y = (X/S) * (W*S)
+    Returns the smooth scale S (on cpu).
     """
     if not isinstance(fcs, list):
         fcs = [fcs]
@@ -64,12 +65,14 @@ def _smooth_ln_fcs(ln, fcs, input_feat, fc_names, alpha=0.5):
     for name in fc_names:
         if name in input_feat:
             input_feat[name] = input_feat[name].div(S.view(1, -1))
+    return S.detach().cpu()
 
 
 @torch.no_grad()
 def _smooth_fc_fc(fc1, fc2, input_feat, fc2_name, alpha=0.5):
     """Apply SmoothQuant smoothing for a FC pair: FC1 -> FC2.
     FC1 weight[out] /= S, FC2 weight *= S
+    Returns the smooth scale S (on cpu).
     """
     act = input_feat[fc2_name]
     weight = fc2.weight.data
@@ -78,25 +81,31 @@ def _smooth_fc_fc(fc1, fc2, input_feat, fc2_name, alpha=0.5):
     S = S.to(input_feat[fc2_name].device)
     if fc2_name in input_feat:
         input_feat[fc2_name] = input_feat[fc2_name].div(S.view(1, -1))
+    return S.detach().cpu()
 
 
 @torch.no_grad()
 def _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=0.5):
     """Apply SmoothQuant-style smoothing to all Linear groups in one layer.
     Supports InternLM2DecoderLayer (InternVL2), Qwen2VLDecoderLayer, LlamaDecoderLayer.
+    Returns smooth_scales: list of (prev_op_name, (fc_names,), S_tensor_cpu)
+      where names are layer-relative (e.g. "attention_norm", "attention.wqkv").
     """
+    smooth_scales = []
 
     if layer.__class__.__name__ == "InternLM2DecoderLayer":
         print(f"Applying SmoothQuant to InternLM2DecoderLayer...", flush=True)
         # InternVL2: attention_norm -> wqkv (fused QKV)
         if "attention.wqkv" in named_linears and "attention.wqkv" in input_feat:
-            _smooth_ln_fcs(layer.attention_norm, [named_linears["attention.wqkv"]],
+            S = _smooth_ln_fcs(layer.attention_norm, [named_linears["attention.wqkv"]],
                           input_feat, ["attention.wqkv"], alpha=smooth_alpha)
+            smooth_scales.append(("attention_norm", ("attention.wqkv",), S))
         # InternVL2: wqkv -> wo
         if ("attention.wo" in named_linears and "attention.wo" in input_feat
                 and "attention.wqkv" in named_linears):
-            _smooth_fc_fc(named_linears["attention.wqkv"], named_linears["attention.wo"],
+            S = _smooth_fc_fc(named_linears["attention.wqkv"], named_linears["attention.wo"],
                          input_feat, "attention.wo", alpha=smooth_alpha)
+            smooth_scales.append(("attention.wqkv", ("attention.wo",), S))
         # InternVL2: ffn_norm -> w1, w3
         gateup_linears = []
         gateup_names = []
@@ -105,12 +114,14 @@ def _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=0.5):
                 gateup_linears.append(named_linears[n])
                 gateup_names.append(n)
         if gateup_linears:
-            _smooth_ln_fcs(layer.ffn_norm, gateup_linears, input_feat, gateup_names, alpha=smooth_alpha)
+            S = _smooth_ln_fcs(layer.ffn_norm, gateup_linears, input_feat, gateup_names, alpha=smooth_alpha)
+            smooth_scales.append(("ffn_norm", tuple(gateup_names), S))
         # InternVL2: w3 -> w2
         if ("feed_forward.w2" in named_linears and "feed_forward.w2" in input_feat
                 and "feed_forward.w3" in named_linears):
-            _smooth_fc_fc(named_linears["feed_forward.w3"], named_linears["feed_forward.w2"],
+            S = _smooth_fc_fc(named_linears["feed_forward.w3"], named_linears["feed_forward.w2"],
                          input_feat, "feed_forward.w2", alpha=smooth_alpha)
+            smooth_scales.append(("feed_forward.w3", ("feed_forward.w2",), S))
 
     elif layer.__class__.__name__ == "Qwen2VLDecoderLayer":
         # Qwen2VL: same structure as Llama
@@ -121,11 +132,13 @@ def _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=0.5):
                 qkv_linears.append(named_linears[n])
                 qkv_names.append(n)
         if qkv_linears:
-            _smooth_ln_fcs(layer.input_layernorm, qkv_linears, input_feat, qkv_names, alpha=smooth_alpha)
+            S = _smooth_ln_fcs(layer.input_layernorm, qkv_linears, input_feat, qkv_names, alpha=smooth_alpha)
+            smooth_scales.append(("input_layernorm", tuple(qkv_names), S))
         if ("self_attn.o_proj" in named_linears and "self_attn.o_proj" in input_feat
                 and hasattr(layer.self_attn, 'v_proj')):
-            _smooth_fc_fc(named_linears["self_attn.v_proj"], named_linears["self_attn.o_proj"],
+            S = _smooth_fc_fc(named_linears["self_attn.v_proj"], named_linears["self_attn.o_proj"],
                          input_feat, "self_attn.o_proj", alpha=smooth_alpha)
+            smooth_scales.append(("self_attn.v_proj", ("self_attn.o_proj",), S))
         gateup_linears = []
         gateup_names = []
         for n in ["mlp.gate_proj", "mlp.up_proj"]:
@@ -133,11 +146,13 @@ def _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=0.5):
                 gateup_linears.append(named_linears[n])
                 gateup_names.append(n)
         if gateup_linears:
-            _smooth_ln_fcs(layer.post_attention_layernorm, gateup_linears, input_feat, gateup_names, alpha=smooth_alpha)
+            S = _smooth_ln_fcs(layer.post_attention_layernorm, gateup_linears, input_feat, gateup_names, alpha=smooth_alpha)
+            smooth_scales.append(("post_attention_layernorm", tuple(gateup_names), S))
         if ("mlp.down_proj" in named_linears and "mlp.down_proj" in input_feat
                 and "mlp.up_proj" in named_linears):
-            _smooth_fc_fc(named_linears["mlp.up_proj"], named_linears["mlp.down_proj"],
+            S = _smooth_fc_fc(named_linears["mlp.up_proj"], named_linears["mlp.down_proj"],
                          input_feat, "mlp.down_proj", alpha=smooth_alpha)
+            smooth_scales.append(("mlp.up_proj", ("mlp.down_proj",), S))
 
     elif isinstance(layer, nn.Module) and hasattr(layer, 'input_layernorm'):
         # Generic Llama-like (LlamaDecoderLayer, etc.)
@@ -148,11 +163,13 @@ def _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=0.5):
                 qkv_linears.append(named_linears[n])
                 qkv_names.append(n)
         if qkv_linears:
-            _smooth_ln_fcs(layer.input_layernorm, qkv_linears, input_feat, qkv_names, alpha=smooth_alpha)
+            S = _smooth_ln_fcs(layer.input_layernorm, qkv_linears, input_feat, qkv_names, alpha=smooth_alpha)
+            smooth_scales.append(("input_layernorm", tuple(qkv_names), S))
         if ("self_attn.o_proj" in named_linears and "self_attn.o_proj" in input_feat
                 and hasattr(layer.self_attn, 'v_proj')):
-            _smooth_fc_fc(named_linears["self_attn.v_proj"], named_linears["self_attn.o_proj"],
+            S = _smooth_fc_fc(named_linears["self_attn.v_proj"], named_linears["self_attn.o_proj"],
                          input_feat, "self_attn.o_proj", alpha=smooth_alpha)
+            smooth_scales.append(("self_attn.v_proj", ("self_attn.o_proj",), S))
         gateup_linears = []
         gateup_names = []
         for n in ["mlp.gate_proj", "mlp.up_proj"]:
@@ -160,14 +177,18 @@ def _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=0.5):
                 gateup_linears.append(named_linears[n])
                 gateup_names.append(n)
         if gateup_linears:
-            _smooth_ln_fcs(layer.post_attention_layernorm, gateup_linears, input_feat, gateup_names, alpha=smooth_alpha)
+            S = _smooth_ln_fcs(layer.post_attention_layernorm, gateup_linears, input_feat, gateup_names, alpha=smooth_alpha)
+            smooth_scales.append(("post_attention_layernorm", tuple(gateup_names), S))
         if ("mlp.down_proj" in named_linears and "mlp.down_proj" in input_feat
                 and "mlp.up_proj" in named_linears):
-            _smooth_fc_fc(named_linears["mlp.up_proj"], named_linears["mlp.down_proj"],
+            S = _smooth_fc_fc(named_linears["mlp.up_proj"], named_linears["mlp.down_proj"],
                          input_feat, "mlp.down_proj", alpha=smooth_alpha)
+            smooth_scales.append(("mlp.up_proj", ("mlp.down_proj",), S))
 
     else:
-        print(f"[SmoothQuant] Warning: unsupported layer type {type(layer).__name__}, skipping smoothing for this layer.")
+        print(f"[SmoothQuant] Warning: unsupported layer type {type(layer).__name__}, skipping smoothing for this layer.", flush=True)
+
+    return smooth_scales
 
 # MBQ新增的
 class GradCacheHook:
@@ -499,7 +520,9 @@ def run_mbq(
         # SmoothQuant-style smoothing before scale search
         if smooth:
             print(f"Applying SmoothQuant-style smoothing to layer {i}...", flush=True)
-            _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=smooth_alpha)
+            smooth_scales = _apply_smooth_layer(layer, named_linears, input_feat, smooth_alpha=smooth_alpha)
+        else:
+            smooth_scales = []
 
         # =======新增
         if reweight:
@@ -587,6 +610,23 @@ def run_mbq(
 
             # apply_scale(layer, scales_list, input_feat_dict=input_feat)
             apply_scale(layers[i], scales_list, input_feat_dict=input_feat)
+
+            # Merge smooth scales into MBQ scales: S_merged = S_smooth * C_mbq
+            if smooth_scales:
+                smooth_lookup = {
+                    (prev_name, tuple(fc_names)): S
+                    for prev_name, fc_names, S in smooth_scales
+                }
+                merged_list = []
+                for entry in scales_list:
+                    prev_op_name, fc_names, scales = entry
+                    key = (prev_op_name, fc_names)
+                    if key in smooth_lookup:
+                        merged_list.append((prev_op_name, fc_names, scales * smooth_lookup[key]))
+                    else:
+                        merged_list.append(entry)
+                scales_list = merged_list
+
             # =========新增
             if distort:
                 # get distort output as next layer's input

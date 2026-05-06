@@ -342,3 +342,150 @@ reweight_ratio 的作用就是告诉 scale search："在最小化输出误差的
 - 量化一定会引入误差（预算有限）
 - 输出梯度告诉你"哪里受伤会更疼"
 - reweight_ratio 就是把"疼痛敏感度"编码进 loss，让搜索算法自动把误差分配到"不那么疼"的区域
+
+---
+
+
+
+## reshape 形状变化的实际案例
+
+以 InternVL2-8B 权重 `attention.wo [4096, 4096]` 为例：
+
+以 InternVL2-8B 的实际参数为例，走三个典型场景：
+
+---
+
+### 场景 1：Per-channel 量化（默认，最常见）
+
+这是 `w_quantize_func` 在 `_search_module_scale` 中被调用时的默认行为：
+
+```
+权重: attention.wo  [out, in] = [4096, 4096]
+
+q_group_size = -1  →  跳过
+per_tensor = False  →  跳过
+
+tensor.shape 保持 [4096, 4096]
+              ↓
+dim=1 上 4096 个元素共享一个 scale/zero
+dim=0 方向有 4096 个 channel → 4096 组独立的 scale/zero
+```
+
+```
+         dim=1 (4096 columns)
+    ┌──────────────────────────────┐
+ d  │ row 0 → scale_0, zero_0      │
+ i  │ row 1 → scale_1, zero_1      │
+ m  │ row 2 → scale_2, zero_2      │  ← 4096 行 = 4096 个 channel
+ =  │  ...                          │
+ 0  │ row 4095 → scale_4095        │
+    └──────────────────────────────┘
+```
+
+---
+
+### 场景 2：分组量化（q_group_size=128）
+
+你配置中 `q_group_size: 128`，权重同一个 channel 内被进一步拆分：
+
+```
+权重: attention.wo  [4096, 4096]
+                       │
+q_group_size = 128 → reshape(-1, 128)
+                       ↓
+reshape 后: [131072, 128]
+            │        │
+            │        └── 每组 128 个元素共享一个 scale/zero
+            │
+            └── 4096 × 4096 / 128 = 131072 组
+```
+
+```
+ 原始形状 [4096, 4096]:
+ ┌────────────────────────────────┐
+ │ channel 0:  [● ● ● ● ... ● ●] │  4096 个元素
+ │ channel 1:  [● ● ● ● ... ● ●] │
+ │ ...                            │
+ │ channel 4095: [● ● ● ● ... ● ●]│
+ └────────────────────────────────┘
+
+ 分组后 [-1, 128]:
+ ┌────────┐
+ │组0  (128)│ ← channel 0 的 [0:128]   → scale₀
+ │组1  (128)│ ← channel 0 的 [128:256] → scale₁
+ │ ...     │
+ │组31 (128)│ ← channel 0 的 [3968:4096]
+ │组32 (128)│ ← channel 1 的 [0:128]   → scale₃₂
+ │ ...     │
+ │131071组 │ ← channel 4095 的末 128
+ └────────┘
+         每组独立 scale/zero → 总共 131072 组
+```
+
+---
+
+### 场景 3：Per-tensor 量化
+
+```
+权重: attention.wo  [4096, 4096]
+                       │
+per_tensor = True → reshape(1, -1)
+                       ↓
+reshape 后: [1, 16777216]
+            │   │
+            │   └── 全部 4096×4096=1670万 个元素展平为一行
+            │
+            └── 1 个 scale / 1 个 zero → 整张量共用一个量化参数
+```
+
+```
+ [1, 16777216]  只有一行 → 一组 scale, zero
+ ┌───────────────────────────────────...──┐
+ │ ●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●...●│  全部 1670 万元素
+ └───────────────────────────────────...──┘
+                 ↑
+        一个 scale, 一个 zero
+```
+
+---
+
+### 场景 4：Activation per-token 量化
+
+通过 `quantize_activation_per_token_absmax` 调用前先做了预处理：
+
+```
+激活值: [batch=1, seq_len=2048, hidden=4096]
+              │
+         外部先 view(-1, hidden)  ← 在调用 pseudo_quantize_tensor 之前
+              ↓
+输入:   [2048, 4096]
+              │
+         q_group_size=-1, per_tensor=False → 不 reshape
+              ↓
+量化:   [2048, 4096]  →  2048 个 token，每个 token 独立 scale/zero
+```
+
+```
+         dim=1 (4096 hidden)
+    ┌──────────────────────────────┐
+    │ token 0 → scale_0, zero_0     │
+    │ token 1 → scale_1, zero_1     │
+ d  │ token 2 → scale_2, zero_2     │  ← 每行 = 每个 token 的 4096 维向量
+ i  │ ...                           │
+ m  │ token 2047 → scale_2047       │
+ =  └──────────────────────────────┘
+ 0
+```
+
+---
+
+### 总结
+
+| 量化方式 | q_group_size | per_tensor | 输入形状 | reshape 后 | dim=0 含义 |
+|---------|:---:|:---:|------|------|------|
+| per-channel | -1 | False | `[4096,4096]` | `[4096,4096]` | 4096 个输出通道 |
+| group-wise(128) | 128 | False | `[4096,4096]` | `[131072,128]` | 131072 个组 |
+| per-tensor | -1 | True | `[4096,4096]` | `[1,16777216]` | 整张量 |
+| per-token (act) | -1 | False | `[2048,4096]` | `[2048,4096]` | 2048 个 token |
+
+核心原则：**reshape 后的 dim=0 决定有多少组独立的量化参数，dim=1 是每组内共享参数的区间**。

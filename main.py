@@ -281,11 +281,22 @@ def parse_eval_args() -> argparse.Namespace:
     parser.add_argument("--w_bit", default=8, type=int)
     parser.add_argument("--a_bit", default=16, type=int)
     parser.add_argument("--w_group", default=128, type=int)
-    parser.add_argument("--alpha", default=0.5, type=int)
+    parser.add_argument("--alpha", default=0.5, type=float)
     parser.add_argument("--reweight", action="store_true")
     parser.add_argument("--distort", action="store_true")
     parser.add_argument("--loss_mode", default="mae", choices=["mae", "mse"])
     parser.add_argument("--scale_path", default=None, type=str)
+    parser.add_argument(
+        "--smooth",
+        action="store_true",
+        help="Enable SmoothQuant-style smoothing before scale search",
+    )
+    parser.add_argument(
+        "--smooth_alpha",
+        default=0.5,
+        type=float,
+        help="SmoothQuant alpha (migration strength, 0=all weight, 1=all activation)",
+    )
     parser.add_argument("--run_process", action="store_true")
     parser.add_argument("--pseudo_quant", action="store_true")
     args = parser.parse_args()

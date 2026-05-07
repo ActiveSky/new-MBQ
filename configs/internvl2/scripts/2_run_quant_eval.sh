@@ -6,9 +6,9 @@ set -e
 
 
 # Configuration
-CONFIG_PATH="configs/internvl2/MBQ_search/my_8b_weight_only_smooth.yaml"  # Change this to your model path
+CONFIG_PATH="configs/internvl2/Eval/my_eval_ocrbench_smooth.yaml"  # Change this to your model path
 LOG_DIR="./logs"  # Directory to save logs
-LOG_FILE="${LOG_DIR}/8b_out_w2g128_smooth.log"  # Log file name
+LOG_FILE="${LOG_DIR}/8b_eval_out_ocrbench_w2g128_smooth.log"  # Log file name
 GPU_ID=6  # GPU device ID
 
 mkdir -p "${LOG_DIR}"
@@ -16,7 +16,7 @@ mkdir -p "${LOG_DIR}"
 exec >> "${LOG_FILE}" 2>&1
 
 echo "========================================="
-echo "Generating  Scales"
+echo "Eval started at: $(date)"
 echo "========================================="
 echo "CONFIG_PATH: ${CONFIG_PATH}"
 echo "LOG_DIR: ${LOG_DIR}"
@@ -34,9 +34,9 @@ echo "========================================="
     exit_code=$?
     echo "========================================="
     if [ "${exit_code}" -eq 0 ]; then
-        echo "Activation scales generated successfully!"
+        echo "eval successfully!"
     else
-        echo "Activation scales generation failed with exit code ${exit_code}!"
+        echo "eval failed with exit code ${exit_code}!"
     fi
     echo "========================================="
     exit "${exit_code}"

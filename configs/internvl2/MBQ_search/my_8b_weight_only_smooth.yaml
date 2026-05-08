@@ -15,7 +15,7 @@ text_data_path: "" # You should specify this arg if you want to use interleave_f
 method: mbq
 run_process: True
 w_bit: 2
-w_group: 128
+w_group: 64
 distort: False # if True, use distort feature map during scale search process
 reweight: True # if True, use avg gradient to reweight the loss of each modality
 loss_mode: mae
@@ -23,6 +23,6 @@ smooth: True # if True, use smooth loss to search better scale for quantization
 smooth_alpha: 0.5 # the alpha for smooth loss, the final loss = alpha * smooth_loss + (1 - alpha) * mae_loss
 
 # output args
-scale_path: scale_cache/mbq/internvl2_8b_w2g128_smooth.pt
+scale_path: scale_cache/mbq/internvl2_8b_w2g64_smooth.pt
 
 

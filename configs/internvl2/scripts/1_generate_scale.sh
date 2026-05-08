@@ -7,7 +7,7 @@ set -e
 # Configuration
 CONFIG_PATH="configs/internvl2/MBQ_search/my_8b_weight_only_smooth.yaml"  # Change this to your model path
 LOG_DIR="./logs"  # Directory to save logs
-LOG_FILE="${LOG_DIR}/8b_out_w2g128_smooth.log"  # Log file name
+LOG_FILE="${LOG_DIR}/8b_out_w2g64_smooth.log"  # Log file name
 GPU_ID=6  # GPU device ID
 
 mkdir -p "${LOG_DIR}"

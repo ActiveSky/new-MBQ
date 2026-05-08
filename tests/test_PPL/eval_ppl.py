@@ -269,6 +269,8 @@ def apply_mbq_quantization_to_model(model, quant_state, args):
         mbq_pseudo_quantize_model_weight(
             base_model, w_bit=args.w_bit, q_config=q_config
         )
+    
+    model.to_cuda()
 
     return model
 

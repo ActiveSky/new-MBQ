@@ -9,7 +9,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # ========== 配置参数 ==========
-GPU_ID=1  # GPU device ID
+GPU_ID=0  # GPU device ID
 MODEL_NAME="internvl2"
 MODEL_PATH="OpenGVLab/InternVL2-8B"
 W_BIT=2
@@ -17,7 +17,7 @@ W_GROUP=64
 A_BIT=16
 DATASET="wikitext2"
 N_SAMPLES=256
-SCALE_FILE_NAME="internvl2_8b_w2g64.pt"
+SCALE_FILE_NAME="internvl2_8b_w2g64_smooth.pt"
 SCALE_PATH="$REPO_ROOT/scale_cache/mbq/$SCALE_FILE_NAME"
 RESULT_DIR="$REPO_ROOT/outputs/ppl"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"

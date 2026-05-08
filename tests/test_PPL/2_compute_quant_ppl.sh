@@ -1,13 +1,15 @@
 #!/bin/bash
+# MBQ Quick PPL Evaluation Script
+# 快速 PPL 评估脚本，用于检验量化效果
 
-
-set -euo pipefail  # 遇到错误立即退出
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # ========== 配置参数 ==========
+GPU_ID=0  # GPU device ID
 MODEL_NAME="internvl2"
 MODEL_PATH="OpenGVLab/InternVL2-8B"
 W_BIT=2
@@ -18,9 +20,12 @@ N_SAMPLES=32
 SCALE_FILE_NAME="internvl2_8b_w${W_BIT}g${W_GROUP}.pt"
 SCALE_PATH="$REPO_ROOT/scale_cache/mbq/$SCALE_FILE_NAME"
 RESULT_DIR="$REPO_ROOT/outputs/ppl"
+LOG_FILE="$RESULT_DIR/eval_quant_w${W_BIT}_$(date +%Y%m%d_%H%M%S).log"
 
 # ========== 创建目录 ==========
 mkdir -p "$RESULT_DIR"
+: > "$LOG_FILE"
+exec >> "$LOG_FILE" 2>&1
 
 if [ ! -f "$SCALE_PATH" ]; then
     echo "ERROR: MBQ scale file not found: $SCALE_PATH"
@@ -28,28 +33,34 @@ if [ ! -f "$SCALE_PATH" ]; then
     exit 1
 fi
 
-echo "=========================================="
-echo "MBQ PPL Evaluation"
-echo "=========================================="
-echo "Model: $MODEL_NAME"
-echo "Bits: W${W_BIT}A${A_BIT}"
-echo "Dataset: $DATASET"
-echo "Scale: $SCALE_PATH"
-echo "=========================================="
+# ========== 评估量化模型 ==========
+(
+    trap '' HUP
+    set +e
+    CUDA_VISIBLE_DEVICES="${GPU_ID}" python eval_ppl.py \
+        --model "$MODEL_NAME" \
+        --model_args "pretrained=$MODEL_PATH" \
+        --dataset "$DATASET" \
+        --n_samples "$N_SAMPLES" \
+        --scale_path "$SCALE_PATH" \
+        --w_bit "$W_BIT" \
+        --w_group "$W_GROUP" \
+        --a_bit "$A_BIT" \
+        --pseudo_quant \
+        --output_path "$RESULT_DIR/mbq_w${W_BIT}_ppl.json" \
+        --verbose
+    exit_code=$?
+    echo "========================================="
+    if [ "${exit_code}" -eq 0 ]; then
+        echo "Quantized PPL evaluation completed successfully!"
+    else
+        echo "Quantized PPL evaluation failed with exit code ${exit_code}!"
+    fi
+    echo "========================================="
+    exit "${exit_code}"
+) &
 
-echo "Evaluating quantized model..."
-
-
-python eval_ppl.py \
-    --model $MODEL_NAME \
-    --model_args pretrained=$MODEL_PATH \
-    --dataset $DATASET \
-    --n_samples $N_SAMPLES \
-    --scale_path $SCALE_PATH \
-    --w_bit $W_BIT \
-    --w_group $W_GROUP \
-    --a_bit $A_BIT \
-    --pseudo_quant \
-    --output_path $RESULT_DIR/mbq_w${W_BIT}_ppl.json \
-    --verbose
-
+echo "========================================="
+echo "Background job started, PID: $!"
+echo "Log: ${LOG_FILE}"
+echo "========================================="

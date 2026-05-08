@@ -26,5 +26,15 @@ class BaseModel():
     def forward(self, *args, **kwargs):
         pass
 
+    def eval(self):
+        if hasattr(self, "model") and hasattr(self.model, "eval"):
+            self.model.eval()
+        return self
+
+    def train(self, mode=True):
+        if hasattr(self, "model") and hasattr(self.model, "train"):
+            self.model.train(mode)
+        return self
+
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)

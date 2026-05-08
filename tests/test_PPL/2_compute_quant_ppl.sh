@@ -9,18 +9,20 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # ========== 配置参数 ==========
-GPU_ID=0  # GPU device ID
+GPU_ID=1  # GPU device ID
 MODEL_NAME="internvl2"
 MODEL_PATH="OpenGVLab/InternVL2-8B"
 W_BIT=2
-W_GROUP=128
+W_GROUP=64
 A_BIT=16
 DATASET="wikitext2"
-N_SAMPLES=32
-SCALE_FILE_NAME="internvl2_8b_w${W_BIT}g${W_GROUP}.pt"
+N_SAMPLES=256
+SCALE_FILE_NAME="internvl2_8b_w2g64.pt"
 SCALE_PATH="$REPO_ROOT/scale_cache/mbq/$SCALE_FILE_NAME"
 RESULT_DIR="$REPO_ROOT/outputs/ppl"
-LOG_FILE="$RESULT_DIR/eval_quant_w${W_BIT}_$(date +%Y%m%d_%H%M%S).log"
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="$RESULT_DIR/eval_quant_w${W_BIT}_${RUN_TS}.log"
+RESULT_JSON="$RESULT_DIR/mbq_w${W_BIT}_${RUN_TS}_ppl.json"
 
 # ========== 创建目录 ==========
 mkdir -p "$RESULT_DIR"
@@ -37,7 +39,7 @@ fi
 (
     trap '' HUP
     set +e
-    CUDA_VISIBLE_DEVICES="${GPU_ID}" python eval_ppl.py \
+    CUDA_VISIBLE_DEVICES="${GPU_ID}" python tests/test_PPL/eval_ppl.py \
         --model "$MODEL_NAME" \
         --model_args "pretrained=$MODEL_PATH" \
         --dataset "$DATASET" \
@@ -47,7 +49,7 @@ fi
         --w_group "$W_GROUP" \
         --a_bit "$A_BIT" \
         --pseudo_quant \
-        --output_path "$RESULT_DIR/mbq_w${W_BIT}_ppl.json" \
+        --output_path "$RESULT_JSON" \
         --verbose
     exit_code=$?
     echo "========================================="

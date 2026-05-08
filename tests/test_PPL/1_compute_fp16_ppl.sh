@@ -13,9 +13,11 @@ GPU_ID=0  # GPU device ID
 MODEL_NAME="internvl2"
 MODEL_PATH="OpenGVLab/InternVL2-8B"
 DATASET="wikitext2"
-N_SAMPLES=32
+N_SAMPLES=256
 RESULT_DIR="$REPO_ROOT/outputs/ppl"
-LOG_FILE="$RESULT_DIR/eval_fp16_$(date +%Y%m%d_%H%M%S).log"
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="$RESULT_DIR/eval_fp16_${RUN_TS}.log"
+RESULT_JSON="$RESULT_DIR/fp16_${RUN_TS}_ppl.json"
 
 # ========== 创建目录 ==========
 mkdir -p "$RESULT_DIR"
@@ -26,12 +28,12 @@ exec >> "$LOG_FILE" 2>&1
 (
     trap '' HUP
     set +e
-    CUDA_VISIBLE_DEVICES="${GPU_ID}" python eval_ppl.py \
+    CUDA_VISIBLE_DEVICES="${GPU_ID}" python tests/test_PPL/eval_ppl.py \
         --model "$MODEL_NAME" \
         --model_args "pretrained=$MODEL_PATH" \
         --dataset "$DATASET" \
         --n_samples "$N_SAMPLES" \
-        --output_path "$RESULT_DIR/fp16_ppl.json" \
+        --output_path "$RESULT_JSON" \
         --verbose
     exit_code=$?
     echo "========================================="

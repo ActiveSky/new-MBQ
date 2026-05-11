@@ -306,6 +306,7 @@ def parse_eval_args() -> argparse.Namespace:
     parser.add_argument("--w_group", default=128, type=int)
     parser.add_argument("--alpha", default=0.5, type=float)
     parser.add_argument("--reweight", action="store_true")
+    parser.add_argument("--reweight_cache_path", default=None, type=str)
     parser.add_argument("--distort", action="store_true")
     parser.add_argument("--loss_mode", default="mae", choices=["mae", "mse"])
     parser.add_argument("--low_rank", action="store_true")
@@ -325,11 +326,21 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
 
     # Check if no arguments were passed after parsing
     if len(sys.argv) == 1:
-        print("┌───────────────────────────────────────────────────────────────────────────────┐")
-        print("│ Please provide arguments to evaluate the model. e.g.                          │")
-        print("│ `lmms-eval --model llava --model_path liuhaotian/llava-v1.6-7b --tasks okvqa` │")
-        print("│ Use `lmms-eval --help` for more information.                                  │")
-        print("└───────────────────────────────────────────────────────────────────────────────┘")
+        print(
+            "┌───────────────────────────────────────────────────────────────────────────────┐"
+        )
+        print(
+            "│ Please provide arguments to evaluate the model. e.g.                          │"
+        )
+        print(
+            "│ `lmms-eval --model llava --model_path liuhaotian/llava-v1.6-7b --tasks okvqa` │"
+        )
+        print(
+            "│ Use `lmms-eval --help` for more information.                                  │"
+        )
+        print(
+            "└───────────────────────────────────────────────────────────────────────────────┘"
+        )
         sys.exit(1)
 
     if args.wandb_args:

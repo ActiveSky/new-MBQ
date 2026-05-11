@@ -18,11 +18,13 @@ w_bit: 2
 w_group: 64
 distort: False # if True, use distort feature map during scale search process
 reweight: True # if True, use avg gradient to reweight the loss of each modality
+reweight_cache_path: "scale_cache/mbq/reweight/internvl2_8b_w2g64_svd_reweight.pt" # the path to cache the avg gradient for reweighting
 loss_mode: mae
-smooth: True # if True, use smooth loss to search better scale for quantization
-smooth_alpha: 0.5 # the alpha for smooth loss, the final loss = alpha * smooth_loss + (1 - alpha) * mae_loss
+low_rank: True # if True, use low rank decomposition to optimize the scale search process
+low_rank_rank: 256 # the rank for low rank decomposition
+low_rank_topk_ratio: 0.7
 
 # output args
-scale_path: scale_cache/mbq/internvl2_8b_w2g64_smooth.pt
+scale_path: scale_cache/mbq/internvl2_8b_w2g64_svd.pt
 
 

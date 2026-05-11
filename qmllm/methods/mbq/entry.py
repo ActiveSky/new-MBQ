@@ -26,6 +26,7 @@ def mbq_entry(
     use_low_rank: bool = False,
     low_rank_rank: int = 16,
     low_rank_topk_ratio: float = 0.4,
+    reweight_cache_path: str = None,
 ):
     """
     model: here the model is the LLM, you have to extract the LLM first!
@@ -55,6 +56,7 @@ def mbq_entry(
             loss_mode=loss_mode,
             wa_quant=wa_quant,
             reweight=reweight,
+            reweight_cache_path=reweight_cache_path,
             distort=distort,
             use_low_rank=use_low_rank,
             low_rank_rank=low_rank_rank,

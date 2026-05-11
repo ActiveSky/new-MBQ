@@ -38,7 +38,11 @@ def parse_quant_args() -> argparse.Namespace:
     该入口同时支持直接命令行传参和后续通过 `--config` 覆盖参数。
     """
     parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--config", default="", help="Path to a yaml file specifying all eval arguments, will ignore cli arguments if specified")
+    parser.add_argument(
+        "--config",
+        default="",
+        help="Path to a yaml file specifying all eval arguments, will ignore cli arguments if specified",
+    )
     parser.add_argument("--model", default="hf", help="Name of model e.g. `hf`")
     parser.add_argument(
         "--model_args",
@@ -60,7 +64,9 @@ def parse_quant_args() -> argparse.Namespace:
         help="Device to use (e.g. cuda, cuda:0, cpu)",
     )
     # calibration parameters
-    parser.add_argument("--calib_data", default="pileval", choices=["pileval", "coco", None])
+    parser.add_argument(
+        "--calib_data", default="pileval", choices=["pileval", "coco", None]
+    )
     parser.add_argument("--n_samples", default=128, type=int)
     parser.add_argument("--data_path", default="", type=str)
     parser.add_argument("--image_folder", default="", type=str)
@@ -69,12 +75,15 @@ def parse_quant_args() -> argparse.Namespace:
     parser.add_argument("--text_data_path", default="", type=str)
 
     # TODO: quantization parameters
-    parser.add_argument("--method", default="awq", choices=["awq", "smoothquant", "mbq", "rtn", None])
+    parser.add_argument(
+        "--method", default="awq", choices=["awq", "smoothquant", "mbq", "rtn", None]
+    )
     parser.add_argument("--w_bit", default=8, type=int)
     parser.add_argument("--a_bit", default=16, type=int)
     parser.add_argument("--w_group", default=128, type=int)
     parser.add_argument("--alpha", default=0.5, type=int)
     parser.add_argument("--reweight", action="store_true")
+    parser.add_argument("--reweight_cache_path", default=None, type=str)
     parser.add_argument("--distort", action="store_true")
     parser.add_argument("--loss_mode", default="mae", choices=["mae", "mse"])
     parser.add_argument("--low_rank", action="store_true")
@@ -140,28 +149,32 @@ def cli_quant_single(args: Union[argparse.Namespace, None] = None) -> None:
 
     # 再根据具体模型类型构造预处理器，后续校准和量化都依赖这个包装后的模型。
     Process_ModelClass = get_process_model(args.model)
-    process_model = Process_ModelClass(lm._model, 
-                                       lm._tokenizer, 
-                                       lm.processor if hasattr(lm, 'processor') else None)
+    process_model = Process_ModelClass(
+        lm._model, lm._tokenizer, lm.processor if hasattr(lm, "processor") else None
+    )
 
     # 根据配置生成校准数据：pileval 走纯文本，coco 走多模态样本。
     prompt_inputs = None
     prompt_kwargs = None
 
     if args.calib_data == "pileval":
-        prompt_inputs, prompt_kwargs = get_calib_dataset(data_path=args.data_path, tokenizer=lm._tokenizer, n_samples=args.n_samples)
+        prompt_inputs, prompt_kwargs = get_calib_dataset(
+            data_path=args.data_path, tokenizer=lm._tokenizer, n_samples=args.n_samples
+        )
     elif args.calib_data == "coco":
-        prompt_inputs, prompt_kwargs = get_multimodal_calib_dataset(data_path=args.data_path,
-                                                                    image_folder=args.image_folder,
-                                                                    model=process_model,
-                                                                    n_samples=args.n_samples,
-                                                                    few_shot_format=args.few_shot_format,
-                                                                    interleave_format=args.interleave_format,
-                                                                    text_data_path=args.text_data_path)
+        prompt_inputs, prompt_kwargs = get_multimodal_calib_dataset(
+            data_path=args.data_path,
+            image_folder=args.image_folder,
+            model=process_model,
+            n_samples=args.n_samples,
+            few_shot_format=args.few_shot_format,
+            interleave_format=args.interleave_format,
+            text_data_path=args.text_data_path,
+        )
 
     # 最后交给量化包装器，执行搜索、伪量化或结果保存等逻辑。
     qwrapper(process_model, prompt_inputs, prompt_kwargs, args)
 
-    
+
 if __name__ == "__main__":
     cli_quant()

@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import tqdm
@@ -5,7 +7,7 @@ import copy
 import gc
 import functools
 from collections import defaultdict
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 from torch.nn import CrossEntropyLoss
@@ -371,6 +373,43 @@ def process_input(prompt_inputs, prompt_kwargs):
     return inputs, vision_mask, caption_mask
 
 
+def _compute_reweight_medians(grad_avg_dict):
+    attn_list = []
+    mlp_list = []
+
+    for key_name in grad_avg_dict:
+        if "down_" in key_name or "w2" in key_name:
+            mlp_list.append(
+                grad_avg_dict[key_name]["vis_avg_grad"]
+                / grad_avg_dict[key_name]["cap_avg_grad"]
+            )
+        if "o_proj" in key_name or "wo" in key_name:
+            attn_list.append(
+                grad_avg_dict[key_name]["vis_avg_grad"]
+                / grad_avg_dict[key_name]["cap_avg_grad"]
+            )
+
+    return np.median(attn_list), np.median(mlp_list)
+
+
+def _load_reweight_cache(reweight_cache_path: Optional[str]):
+    if not reweight_cache_path or not os.path.exists(reweight_cache_path):
+        return None
+
+    return torch.load(reweight_cache_path, map_location="cpu")
+
+
+def _save_reweight_cache(reweight_cache_path: Optional[str], reweight_cache: dict):
+    if not reweight_cache_path:
+        return
+
+    dirpath = os.path.dirname(reweight_cache_path)
+    if dirpath:
+        os.makedirs(dirpath, exist_ok=True)
+
+    torch.save(reweight_cache, reweight_cache_path)
+
+
 @torch.no_grad()
 def run_mbq(
     model,
@@ -384,6 +423,7 @@ def run_mbq(
     loss_mode="mae",
     wa_quant=False,
     reweight=False,
+    reweight_cache_path: Optional[str] = None,
     distort=False,
     use_low_rank=False,
     low_rank_rank=16,
@@ -445,55 +485,60 @@ def run_mbq(
 
     # ===========MBQ:下面reweight和distort都是新增
     if reweight:
-        model.to_cuda()
-        print("Save gradient...")
-        # save gradient
-        grad_cache = GradCacheHook(vis_masks=vision_mask, cap_masks=caption_mask)
-        grad_cache.register_hooks(layers=layers)
+        reweight_cache = _load_reweight_cache(reweight_cache_path)
 
-        with torch.enable_grad():
-            mini_batch = 1
-            total_samples = next(iter(prompt_inputs.values())).shape[0]
-            accum_steps = int(total_samples / mini_batch)
+        if reweight_cache is not None:
+            grad_avg_dict = reweight_cache["grad_avg_dict"]
+            attn_median = reweight_cache.get("attn_median")
+            mlp_median = reweight_cache.get("mlp_median")
+            if attn_median is None or mlp_median is None:
+                attn_median, mlp_median = _compute_reweight_medians(grad_avg_dict)
+                reweight_cache["attn_median"] = attn_median
+                reweight_cache["mlp_median"] = mlp_median
+            print("Loaded reweight cache, skipping gradient recomputation.")
+        else:
+            model.to_cuda()
+            print("Save gradient...")
+            # save gradient
+            grad_cache = GradCacheHook(vis_masks=vision_mask, cap_masks=caption_mask)
+            grad_cache.register_hooks(layers=layers)
 
-            for i in tqdm.tqdm(
-                range(0, total_samples, mini_batch),
-                desc="Running gradient calculation...",
-            ):
-                mini_inputs = {}
-                for k in inputs:
-                    if isinstance(inputs[k], torch.Tensor):
-                        mini_inputs[k] = inputs[k][i : i + mini_batch]
+            with torch.enable_grad():
+                mini_batch = 1
+                total_samples = next(iter(prompt_inputs.values())).shape[0]
+                accum_steps = int(total_samples / mini_batch)
 
-                outputs = model(**mini_inputs)
+                for i in tqdm.tqdm(
+                    range(0, total_samples, mini_batch),
+                    desc="Running gradient calculation...",
+                ):
+                    mini_inputs = {}
+                    for k in inputs:
+                        if isinstance(inputs[k], torch.Tensor):
+                            mini_inputs[k] = inputs[k][i : i + mini_batch]
 
-                loss = outputs[0]
+                    outputs = model(**mini_inputs)
 
-                loss = loss / accum_steps
-                loss.backward()
+                    loss = outputs[0]
 
-        model.to_cpu()
-        grad_avg_dict = grad_cache.get_avg_grad_dict()
-        grad_cache.remove_hooks()
-        del grad_cache
+                    loss = loss / accum_steps
+                    loss.backward()
 
-        attn_list = []
-        mlp_list = []
+            model.to_cpu()
+            grad_avg_dict = grad_cache.get_avg_grad_dict()
+            grad_cache.remove_hooks()
+            del grad_cache
 
-        for key_name in grad_avg_dict:
-            if "down_" in key_name or "w2" in key_name:
-                mlp_list.append(
-                    grad_avg_dict[key_name]["vis_avg_grad"]
-                    / grad_avg_dict[key_name]["cap_avg_grad"]
-                )
-            if "o_proj" in key_name or "wo" in key_name:
-                attn_list.append(
-                    grad_avg_dict[key_name]["vis_avg_grad"]
-                    / grad_avg_dict[key_name]["cap_avg_grad"]
-                )
+            attn_median, mlp_median = _compute_reweight_medians(grad_avg_dict)
+            reweight_cache = {
+                "grad_avg_dict": grad_avg_dict,
+                "attn_median": attn_median,
+                "mlp_median": mlp_median,
+            }
 
-        attn_median = np.median(attn_list)
-        mlp_median = np.median(mlp_list)
+            _save_reweight_cache(reweight_cache_path, reweight_cache)
+            if reweight_cache_path:
+                print("Reweight cache saved at", reweight_cache_path)
 
     if distort:
         # assert wa_quant, "We only support distort input in weight-activation quantization!!!"

@@ -135,7 +135,7 @@ def _build_low_rank_states(model, candidates, topk_ratio, w_bit, q_config):
     # 初始化最终的 low-rank 状态列表。
     low_rank_results = []
     # 逐个为选中的层构建 low-rank 补偿矩阵。
-    for item in selected:
+    for item in tqdm.tqdm(selected, desc="Building low-rank states"):
         # 根据完整模块名，从模型里重新取回该线性层。
         module = get_op_by_name(model, item["name"])
         # 读取 apply_scale 后的浮点权重，作为 low-rank 补偿的目标基准。
@@ -184,6 +184,7 @@ def _build_low_rank_states(model, candidates, topk_ratio, w_bit, q_config):
             }
         )
 
+    print("Low-rank states built.")
     # 返回所有选中层的 low-rank 状态。
     return low_rank_results
 
@@ -389,14 +390,21 @@ def _compute_reweight_medians(grad_avg_dict):
                 / grad_avg_dict[key_name]["cap_avg_grad"]
             )
 
-    return np.median(attn_list), np.median(mlp_list)
+    return float(np.median(attn_list)), float(np.median(mlp_list))
 
 
 def _load_reweight_cache(reweight_cache_path: Optional[str]):
     if not reweight_cache_path or not os.path.exists(reweight_cache_path):
         return None
 
-    return torch.load(reweight_cache_path, map_location="cpu")
+    try:
+        return torch.load(
+            reweight_cache_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+    except TypeError:
+        return torch.load(reweight_cache_path, map_location="cpu")
 
 
 def _save_reweight_cache(reweight_cache_path: Optional[str], reweight_cache: dict):
@@ -532,8 +540,8 @@ def run_mbq(
             attn_median, mlp_median = _compute_reweight_medians(grad_avg_dict)
             reweight_cache = {
                 "grad_avg_dict": grad_avg_dict,
-                "attn_median": attn_median,
-                "mlp_median": mlp_median,
+                "attn_median": float(attn_median),
+                "mlp_median": float(mlp_median),
             }
 
             _save_reweight_cache(reweight_cache_path, reweight_cache)
@@ -743,6 +751,7 @@ def run_mbq(
         torch.cuda.empty_cache()
 
     if use_low_rank and (not wa_quant):
+        print("Building low-rank states...")
         mbq_results["low_rank"] = _build_low_rank_states(
             model.model, low_rank_candidates, low_rank_topk_ratio, w_bit, q_config
         )

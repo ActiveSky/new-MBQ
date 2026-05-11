@@ -12,17 +12,24 @@ def qwrapper(model, prompt_inputs, prompt_kwargs, args):
         model = smoothquant_entry(model, prompt_inputs, prompt_kwargs, run_sq_process=args.run_process, pseudo_quant=args.pseudo_quant, scale_path=args.scale_path, w_bit=args.w_bit, a_bit=args.a_bit, alpha=args.alpha)
     elif args.method == "mbq":
         wa_quant = args.w_bit < 16 and args.a_bit < 16
-        model = mbq_entry(model, prompt_inputs, prompt_kwargs, 
-                                run_mbq_process=args.run_process, 
-                                pseudo_quant=args.pseudo_quant, 
-                                scale_path=args.scale_path, 
-                                q_group_size=args.w_group, 
-                                w_bit=args.w_bit, 
-                                a_bit=args.a_bit, 
-                                wa_quant=wa_quant, 
-                                reweight=args.reweight,
-                                distort=args.distort,
-                                loss_mode=args.loss_mode)
+        model = mbq_entry(
+            model,
+            prompt_inputs,
+            prompt_kwargs,
+            run_mbq_process=args.run_process,
+            pseudo_quant=args.pseudo_quant,
+            scale_path=args.scale_path,
+            q_group_size=args.w_group,
+            w_bit=args.w_bit,
+            a_bit=args.a_bit,
+            wa_quant=wa_quant,
+            reweight=args.reweight,
+            distort=args.distort,
+            loss_mode=args.loss_mode,
+            use_low_rank=args.low_rank,
+            low_rank_rank=args.low_rank_rank,
+            low_rank_topk_ratio=args.low_rank_topk_ratio,
+        )
     elif args.method == "rtn":
         wa_quant = args.w_bit < 16 and args.a_bit < 16
         model = rtn_entry(model, pseudo_quant=args.pseudo_quant, wa_quant=wa_quant, q_group_size=args.w_group, w_bit=args.w_bit, a_bit=args.a_bit)

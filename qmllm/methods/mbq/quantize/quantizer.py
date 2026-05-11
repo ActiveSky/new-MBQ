@@ -7,7 +7,7 @@ from qmllm.utils.search import set_op_by_name
 
 from transformers.models.bloom.modeling_bloom import BloomBlock
 from qmllm.quantization.quant_funcs import pseudo_quantize_tensor
-from qmllm.quantization.qlinear import WALinear
+from qmllm.quantization.qlinear import WALinear, WOQLowRankLinear
 
 EMBEDDING_KEYWORDS = ["embed"]
 LM_HEAD_KEYWORDS = ["lm_head", "embed_out", "output"]
@@ -58,25 +58,47 @@ def scale_activations(module):
         )
         set_op_by_name(module, "mlp.act", act)
 
+
 @torch.no_grad()
 def pseudo_quantize_model_weight(
     model,
     w_bit,
     q_config,
+    low_rank_results=None,
 ):
     from .pre_quant import get_blocks, get_named_linears
+    from qmllm.utils.search import get_op_name
 
     layers = get_blocks(model)
+    low_rank_results = low_rank_results or []
+    low_rank_map = {item["name"]: item for item in low_rank_results}
     for i in tqdm(range(len(layers)), desc="pseudo weight quantization..."):
+        layer_name = get_op_name(model, layers[i])
         named_linears = get_named_linears(layers[i])
         for n, m in named_linears.items():
-            # m.cuda()
-            m.weight.data = pseudo_quantize_tensor(
-                m.weight.data, n_bits=w_bit, **q_config
-            )
-            # m.cpu()
+            full_name = layer_name + "." + n
 
-#下面是MBQ相比于AWQ增加的
+            if full_name in low_rank_map:
+                low_rank_state = low_rank_map[full_name]
+                new_linear = WOQLowRankLinear.from_float(
+                    m,
+                    low_rank_state,
+                    weight_quant="per_group",
+                    w_bit=w_bit,
+                    weight_group=q_config.get("q_group_size", 128),
+                )
+                father_module = get_module_by_name_suffix(
+                    layers[i], ".".join(n.split(".")[:-1])
+                )
+                setattr(father_module, n.split(".")[-1], new_linear)
+                del new_linear, m
+            else:
+                m.weight.data = pseudo_quantize_tensor(
+                    m.weight.data, n_bits=w_bit, **q_config
+                )
+
+
+# 下面是MBQ相比于AWQ增加的
 def get_module_by_name_suffix(model, module_name: str):
     for name, module in model.named_modules():
         if name.endswith(module_name):

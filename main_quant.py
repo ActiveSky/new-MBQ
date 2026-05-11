@@ -77,6 +77,9 @@ def parse_quant_args() -> argparse.Namespace:
     parser.add_argument("--reweight", action="store_true")
     parser.add_argument("--distort", action="store_true")
     parser.add_argument("--loss_mode", default="mae", choices=["mae", "mse"])
+    parser.add_argument("--low_rank", action="store_true")
+    parser.add_argument("--low_rank_rank", default=16, type=int)
+    parser.add_argument("--low_rank_topk_ratio", default=0.4, type=float)
 
     parser.add_argument("--scale_path", default=None, type=str)
     parser.add_argument("--run_process", action="store_true")

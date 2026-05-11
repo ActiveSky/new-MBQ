@@ -23,6 +23,9 @@ def mbq_entry(
     reweight: bool = False,
     distort: bool = False,
     loss_mode: str = "mae",
+    use_low_rank: bool = False,
+    low_rank_rank: int = 16,
+    low_rank_topk_ratio: float = 0.4,
 ):
     """
     model: here the model is the LLM, you have to extract the LLM first!
@@ -53,6 +56,9 @@ def mbq_entry(
             wa_quant=wa_quant,
             reweight=reweight,
             distort=distort,
+            use_low_rank=use_low_rank,
+            low_rank_rank=low_rank_rank,
+            low_rank_topk_ratio=low_rank_topk_ratio,
         )
 
         dirpath = os.path.dirname(scale_path)
@@ -71,7 +77,12 @@ def mbq_entry(
 
         if not wa_quant:
             # weight quantization
-            pseudo_quantize_model_weight(model.model, w_bit=w_bit, q_config=q_config)
+            pseudo_quantize_model_weight(
+                model.model,
+                w_bit=w_bit,
+                q_config=q_config,
+                low_rank_results=mbq_results.get("low_rank", []),
+            )
         else:
             # weight activation quantization
             pseudo_quantize_model_weight_act(model.model, w_bit=w_bit, a_bit=a_bit)

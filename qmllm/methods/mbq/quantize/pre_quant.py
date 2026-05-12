@@ -154,8 +154,33 @@ def _build_low_rank_states(model, candidates, topk_ratio, w_bit, q_config):
         if rank <= 0:
             continue
 
-        # 对残差矩阵做完整 SVD 分解：residual = U @ diag(S) @ Vh。
-        U, S, Vh = torch.linalg.svd(residual, full_matrices=False)
+        # 对残差矩阵做低秩分解：优先在 GPU 上做截断 SVD，只在必要时回退到完整 SVD。
+        svd_device = (
+            torch.device("cuda") if torch.cuda.is_available() else residual.device
+        )
+        residual_svd = residual.to(svd_device, non_blocking=True)
+        try:
+            if rank < max_rank:
+                # q 作为随机 SVD 的探测维度，略大于目标 rank 以提升近似质量。
+                svd_q = min(max(rank + 8, int(rank * 1.5)), max_rank - 1)
+                svd_q = max(rank, svd_q)
+                U, S, V = torch.svd_lowrank(residual_svd, q=svd_q, niter=2)
+                # torch.svd_lowrank 不保证按奇异值大小排序，这里先排序再截断。
+                order = torch.argsort(S, descending=True)
+                U = U[:, order]
+                S = S[order]
+                Vh = V[:, order].transpose(0, 1)
+            else:
+                U, S, Vh = torch.linalg.svd(residual_svd, full_matrices=False)
+        except RuntimeError:
+            # 如果随机 SVD 在当前设备上失败，就退回到标准 SVD 保证结果可用。
+            print("Randomized SVD failed for layer {}, falling back to full SVD.".format(item["name"]))
+            U, S, Vh = torch.linalg.svd(residual_svd, full_matrices=False)
+        finally:
+            # 仅释放引用；不在循环内做 empty_cache，避免每层都触发昂贵的 GPU 内存整理。
+            if residual_svd.device.type == "cuda":
+                del residual_svd
+
         # 只保留前 rank 个最重要的奇异向量。
         U_r = U[:, :rank]
         # 只保留前 rank 个奇异值。

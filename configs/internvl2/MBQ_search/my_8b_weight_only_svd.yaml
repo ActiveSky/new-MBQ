@@ -22,7 +22,8 @@ reweight_cache_path: "scale_cache/mbq/reweight/internvl2_8b_reweight.pt" # the p
 loss_mode: mae
 low_rank: True # if True, use low rank decomposition to optimize the scale search process
 low_rank_rank: 256 # the rank for low rank decomposition
-low_rank_topk_ratio: 0.7
+low_rank_attn_topk_ratio: 0.9
+low_rank_mlp_topk_ratio: 0.9
 
 # output args
 scale_path: scale_cache/mbq/internvl2_8b_w2g64_svd_r_256.pt

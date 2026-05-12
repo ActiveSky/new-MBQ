@@ -31,69 +31,227 @@ __all__ = ["run_mbq"]
 
 @torch.no_grad()
 def _collect_internvl2_low_rank_candidates(
-    layer, layer_name, input_feat, w_bit, q_config, rank
+    layer,
+    layer_name,
+    input_feat,
+    w_bit,
+    q_config,
+    rank,
+    ans_mask=None,
+    vis_mask=None,
+    reweight_ratio_dict=None,
 ):
-    """收集 InternVL2 / InternLM2 attention.wqkv 的 low-rank 候选层。
+    """收集 InternVL2 / InternLM2 的 low-rank 候选层。
 
     这个函数当前只负责“打分”，不真正计算 SVD。
-    它会对当前 layer 中的 `attention.wqkv` 做一次与真实部署一致的伪量化，
-    然后根据权重残差 `W - W_q` 的相对大小，得到该层是否值得进入 top-k 的分数。
+    它会对当前 layer 中预定义的 attention / MLP 线性层做一次与真实部署一致的伪量化，
+    然后根据权重残差 `W - W_q` 的相对大小，得到这些层是否值得进入 top-k 的分数。
 
     参数:
         layer: 当前正在处理的 transformer block。
         layer_name: 当前 block 在完整模型中的路径名。
-        input_feat: 当前 block 缓存到的各线性层输入特征，当前函数里仅用于判断 wqkv 是否存在。
+        input_feat: 当前 block 缓存到的各线性层输入特征，当前函数里用于判断目标模块是否存在可用输入。
         w_bit: 权重量化 bit 数。
         q_config: 当前量化配置，如 group size、zero point 等。
         rank: 如果该层后续被选中，预期分配给它的固定 low-rank rank。
 
     返回:
-        candidates: 一个列表；当前实现里最多只会加入一个字典，表示该层的 wqkv 候选信息。
+        candidates: 一个列表；每个字典表示当前层里一个可用于 low-rank 补偿的候选线性层。
     """
-    # 初始化候选列表；之所以保持列表接口，是为了后续更容易扩展到 wo / w2 等其他模块。
+    # 初始化候选列表；保持列表接口便于把 attention 和 MLP 一起统一排序选 top-k。
     candidates = []
     # 只在 InternLM2DecoderLayer 上启用当前逻辑，避免误作用到其他架构。
     if layer.__class__.__name__ != "InternLM2DecoderLayer":
         return candidates
-    # 防御式检查：当前层必须真的带有 attention 子模块，且 attention 中必须有 fused QKV。
-    if not hasattr(layer, "attention") or not hasattr(layer.attention, "wqkv"):
-        return candidates
-    # 如果本层前向过程中没有缓存到 wqkv 的输入特征，说明这条路径当前不可用，直接跳过。
-    if "attention.wqkv" not in input_feat:
-        return candidates
+    # (module_name, module_type, module_family)
+    # module_family 同时用作 reweight_key，因为当前 attention / MLP 的权重系数也是 attn / mlp。
+    candidate_specs = [
+        ("attention.wqkv", "attention_wqkv", "attn"),
+        ("feed_forward.w1", "mlp_w1", "mlp"),
+        ("feed_forward.w3", "mlp_w3", "mlp"),
+        ("feed_forward.w2", "mlp_w2", "mlp"),
+    ]
 
-    # 取出当前层的 fused QKV 线性层。
-    module = layer.attention.wqkv
-    # 读取 apply_scale 之后的浮点权重；这里 detach + float，是为了后续稳定做误差评估。
-    weight_fp = module.weight.data.detach().float()
-    # 用与真实部署一致的量化配置做一次伪量化，得到 2bit / 4bit 等主路径上的量化权重。
-    weight_q = pseudo_quantize_tensor(
-        weight_fp, n_bits=w_bit, inplace=False, **q_config
-    )
-    # 计算权重残差；当前版本的候选打分只看 W 和 W_q 的差，不看输出误差。
-    residual = weight_fp - weight_q
-    # 用原始权重能量做归一化，避免仅仅因为层大就天然得到更大的分数。
-    denom = weight_fp.pow(2).sum().clamp(min=1e-6)
-    # 分数越大，表示该层量化后丢失的信息越多，越值得进入后续 top-k low-rank 补偿。
-    score = residual.pow(2).sum() / denom
+    def _compute_activation_aware_relative_error(
+        flat_input,
+        weight_fp,
+        residual_weight,
+        token_mask=None,
+        chunk_size=1024,
+    ):
+        # 如果传入了 token_mask，只保留被选中的 token 的激活值。
+        if token_mask is not None:
+            token_mask = token_mask.reshape(-1).to(dtype=torch.bool)
+            # 如果 mask 形状与 token 总数不匹配，说明 mask 与输入不兼容，直接返回 None。
+            if token_mask.numel() != flat_input.shape[0]:
+                return None
+            # 用 mask 筛选出有效的激活值（例如只保留 answer 或 vision 区域）。
+            flat_input = flat_input[token_mask]
 
-    # 把当前层登记为候选项；这里只保存轻量信息，真正的 SVD 会在 top-k 选完后再统一做。
-    candidates.append(
-        {
-            # 保存完整模块路径，后续构建 low-rank 状态时会据此重新拿回真实模块。
-            "name": layer_name + ".attention.wqkv",
-            # 保存当前层的量化残差分数，供后续排序选 top-k。
-            "score": float(score.item()),
-            # 当前版本先使用固定 rank；真正构建状态时仍会再和最大可分解 rank 取 min。
-            "rank": int(rank),
-        }
-    )
+        # 如果筛选后没有剩余 token，无法计算相对误差，返回 None。
+        if flat_input.numel() == 0:
+            return None
+
+        # 把计算放到权重所在的设备上，避免反复搬运。
+        device = weight_fp.device
+        # numerator 累积量化后的输出误差能量：||X(W - Wq)||²。
+        numerator = torch.zeros((), dtype=torch.float32, device=device)
+        # denominator 累积原始输出能量：||XW||²，用于归一化。
+        denominator = torch.zeros((), dtype=torch.float32, device=device)
+        # 分块计算，避免单次矩阵乘法占用过多显存。
+        for start in range(0, flat_input.shape[0], chunk_size):
+            feat_chunk = flat_input[start : start + chunk_size].to(
+                device, non_blocking=True
+            )
+            ref_chunk = torch.nn.functional.linear(feat_chunk, weight_fp)
+            err_chunk = torch.nn.functional.linear(feat_chunk, residual_weight)
+            numerator += err_chunk.float().pow(2).sum()
+            denominator += ref_chunk.float().pow(2).sum()
+
+        # 返回相对误差：||X(W - Wq)||² / ||XW||²。
+        # clamp 防止分母接近 0 导致除零异常。
+        return float((numerator / denominator.clamp(min=1e-6)).item())
+
+    def _compute_multimodal_activation_aware_score(
+        module_input,
+        weight_fp,
+        weight_q,
+        token_ans_mask=None,
+        token_vis_mask=None,
+        reweight_ratio=None,
+    ):
+        # 将输入激活展平为 [所有 token, hidden_dim]，并转为 float 保证精度。
+        flat_input = module_input.reshape(-1, module_input.shape[-1]).float()
+        # 计算量化造成的权重残差矩阵：W - Wq。
+        residual_weight = (weight_fp - weight_q).float()
+
+        # 先计算全局（所有 token）的激活感知相对误差。
+        global_score = _compute_activation_aware_relative_error(
+            flat_input,
+            weight_fp,
+            residual_weight,
+        )
+        # 如果没有多模态 mask（纯文本场景），直接返回全局误差作为得分。
+        if token_ans_mask is None or token_vis_mask is None:
+            return global_score
+
+        # 计算只在 answer（caption）token 上的激活感知相对误差。
+        # 这衡量了该层量化对文本输出质量的直接影响。
+        ans_score = _compute_activation_aware_relative_error(
+            flat_input,
+            weight_fp,
+            residual_weight,
+            token_mask=token_ans_mask,
+        )
+        # 计算只在视觉 token 上的激活感知相对误差。
+        # 这衡量了该层量化对视觉理解质量的直接影响。
+        vis_score = _compute_activation_aware_relative_error(
+            flat_input,
+            weight_fp,
+            residual_weight,
+            token_mask=token_vis_mask,
+        )
+
+        # 如果某个区域的 mask 筛选后没有可用 token，就用另一个区域的得分代替。
+        if ans_score is None and vis_score is None:
+            return global_score
+        if ans_score is None:
+            return vis_score
+        if vis_score is None:
+            return ans_score
+        # 如果没有 reweight 系数，直接简单相加。
+        if reweight_ratio is None:
+            return ans_score + vis_score
+        # 用 reweight 系数加权合并：L = L_ans + lambda * L_vis。
+        # lambda 越大，视觉区域的量化误差在候选评分中权重越高。
+        return ans_score + float(reweight_ratio) * vis_score
+
+    for module_name, module_type, module_family in candidate_specs:
+        # 当前前向过程中没有缓存到该线性层输入特征，说明这条路径当前不可用，直接跳过。
+        if module_name not in input_feat:
+            continue
+
+        module = get_op_by_name(layer, module_name)
+        if module is None or not isinstance(module, nn.Linear):
+            continue
+
+        # 读取 apply_scale 之后的浮点权重；这里 detach + float，是为了后续稳定做误差评估。
+        weight_fp = module.weight.data.detach().float()
+        # 用与真实部署一致的量化配置做一次伪量化，得到 2bit / 4bit 等主路径上的量化权重。
+        weight_q = pseudo_quantize_tensor(
+            weight_fp, n_bits=w_bit, inplace=False, **q_config
+        )
+        reweight_ratio = None
+        if reweight_ratio_dict is not None:
+            reweight_ratio = reweight_ratio_dict.get(module_family)
+
+        # 分数越大，表示该层在真实多模态激活下量化后丢失的信息越多，越值得进入后续 top-k low-rank 补偿。
+        score = _compute_multimodal_activation_aware_score(
+            input_feat[module_name],
+            weight_fp,
+            weight_q,
+            token_ans_mask=ans_mask,
+            token_vis_mask=vis_mask,
+            reweight_ratio=reweight_ratio,
+        )
+
+        # 把当前层登记为候选项；这里只保存轻量信息，真正的 SVD 会在 top-k 选完后再统一做。
+        candidates.append(
+            {
+                # 保存完整模块路径，后续构建 low-rank 状态时会据此重新拿回真实模块。
+                "name": layer_name + "." + module_name,
+                # 保存当前层的量化残差分数，供后续排序选 top-k。
+                "score": float(score.item()),
+                # 当前版本先使用固定 rank；真正构建状态时仍会再和最大可分解 rank 取 min。
+                "rank": int(rank),
+                # 保存模块类型，便于后续打印 attention / MLP 的候选与入选统计。
+                "module_type": module_type,
+                # 保存模块族，供 attention / MLP 分桶 top-k 使用。
+                "module_family": module_family,
+            }
+        )
+
     # 返回当前层收集到的候选结果。
     return candidates
 
 
+def _select_low_rank_candidates(
+    candidates,
+    attn_topk_ratio=0.4,
+    mlp_topk_ratio=0.4,
+):
+    def _take_topk(group_candidates, ratio):
+        ratio = max(0.0, min(1.0, float(ratio)))
+        if not group_candidates or ratio <= 0:
+            return []
+        topk_count = int(np.ceil(len(group_candidates) * ratio))
+        topk_count = min(len(group_candidates), max(0, topk_count))
+        return sorted(group_candidates, key=lambda item: item["score"], reverse=True)[
+            :topk_count
+        ]
+
+    attn_ratio = float(attn_topk_ratio)
+    mlp_ratio = float(mlp_topk_ratio)
+    attn_candidates = [
+        item for item in candidates if item.get("module_family") == "attn"
+    ]
+    mlp_candidates = [item for item in candidates if item.get("module_family") == "mlp"]
+
+    selected = []
+    selected.extend(_take_topk(attn_candidates, attn_ratio))
+    selected.extend(_take_topk(mlp_candidates, mlp_ratio))
+    return sorted(selected, key=lambda item: item["score"], reverse=True)
+
+
 @torch.no_grad()
-def _build_low_rank_states(model, candidates, topk_ratio, w_bit, q_config):
+def _build_low_rank_states(
+    model,
+    candidates,
+    w_bit,
+    q_config,
+    attn_topk_ratio=0.4,
+    mlp_topk_ratio=0.4,
+):
     """根据候选层分数，真正构建可保存的 low-rank SVD 状态。
 
     这个函数会先按 score 选出 top-k 候选层，再重新从模型里取回对应模块，
@@ -107,7 +265,8 @@ def _build_low_rank_states(model, candidates, topk_ratio, w_bit, q_config):
     参数:
         model: 当前已经 apply_scale 后的完整语言模型。
         candidates: 所有候选层的轻量信息列表，每项至少包含 name / score / rank。
-        topk_ratio: 取前百分之多少的候选层进入 low-rank 补偿。
+        attn_topk_ratio: attention 族候选层 top-k 比例。
+        mlp_topk_ratio: MLP 族候选层 top-k 比例。
         w_bit: 权重量化 bit 数。
         q_config: 当前量化配置，如 group size、zero point 等。
 
@@ -118,20 +277,31 @@ def _build_low_rank_states(model, candidates, topk_ratio, w_bit, q_config):
     if not candidates:
         return []
 
-    # 将 top-k 比例限制在 [0, 1] 区间内，防止配置越界。
-    topk_ratio = max(0.0, min(1.0, float(topk_ratio)))
-    # 根据候选层总数和比例，计算应该保留多少个候选层进入 low-rank 补偿。
-    topk_count = int(np.ceil(len(candidates) * topk_ratio)) if topk_ratio > 0 else 0
-    # 再做一次边界裁剪，确保数量不会小于 0 或大于候选层总数。
-    topk_count = min(len(candidates), max(0, topk_count))
-    # 如果比例太小导致 top-k 数量为 0，就直接返回空列表。
-    if topk_count == 0:
+    candidate_type_counter = defaultdict(int)
+    for item in candidates:
+        candidate_type_counter[item.get("module_type", "unknown")] += 1
+    print(
+        "Low-rank candidates collected: total={}, detail={}".format(
+            len(candidates), dict(candidate_type_counter)
+        )
+    )
+
+    selected = _select_low_rank_candidates(
+        candidates,
+        attn_topk_ratio=attn_topk_ratio,
+        mlp_topk_ratio=mlp_topk_ratio,
+    )
+    if not selected:
         return []
 
-    # 按分数从大到小排序，只保留前 top-k 个层。
-    selected = sorted(candidates, key=lambda item: item["score"], reverse=True)[
-        :topk_count
-    ]
+    selected_type_counter = defaultdict(int)
+    for item in selected:
+        selected_type_counter[item.get("module_type", "unknown")] += 1
+    print(
+        "Low-rank candidates selected: total={}, detail={}".format(
+            len(selected), dict(selected_type_counter)
+        )
+    )
     # 初始化最终的 low-rank 状态列表。
     low_rank_results = []
     # 逐个为选中的层构建 low-rank 补偿矩阵。
@@ -174,7 +344,11 @@ def _build_low_rank_states(model, candidates, topk_ratio, w_bit, q_config):
                 U, S, Vh = torch.linalg.svd(residual_svd, full_matrices=False)
         except RuntimeError:
             # 如果随机 SVD 在当前设备上失败，就退回到标准 SVD 保证结果可用。
-            print("Randomized SVD failed for layer {}, falling back to full SVD.".format(item["name"]))
+            print(
+                "Randomized SVD failed for layer {}, falling back to full SVD.".format(
+                    item["name"]
+                )
+            )
             U, S, Vh = torch.linalg.svd(residual_svd, full_matrices=False)
         finally:
             # 仅释放引用；不在循环内做 empty_cache，避免每层都触发昂贵的 GPU 内存整理。
@@ -203,6 +377,8 @@ def _build_low_rank_states(model, candidates, topk_ratio, w_bit, q_config):
                 "rank": rank,
                 # 把候选打分一并保存，方便后续分析和调试。
                 "score": item["score"],
+                # 保存模块类型，便于后续分析 attention / MLP 的 low-rank 分布。
+                "module_type": item.get("module_type", "unknown"),
                 # up / down 都先转成 half 并搬到 CPU，减少保存文件体积。
                 "up": up.half().cpu(),
                 "down": down.half().cpu(),
@@ -460,7 +636,8 @@ def run_mbq(
     distort=False,
     use_low_rank=False,
     low_rank_rank=16,
-    low_rank_topk_ratio=0.4,
+    low_rank_attn_topk_ratio=0.4,
+    low_rank_mlp_topk_ratio=0.4,
 ):
     if "bigcode" in str(model.model.__class__).lower():
         # otherwise attention_mask will always be on cpu.
@@ -715,6 +892,9 @@ def run_mbq(
                         w_bit,
                         q_config,
                         low_rank_rank,
+                        ans_mask=caption_mask,
+                        vis_mask=vision_mask,
+                        reweight_ratio_dict=scale_reweight_ratio_dict,
                     )
                 )
 
@@ -778,7 +958,12 @@ def run_mbq(
     if use_low_rank and (not wa_quant):
         print("Building low-rank states...")
         mbq_results["low_rank"] = _build_low_rank_states(
-            model.model, low_rank_candidates, low_rank_topk_ratio, w_bit, q_config
+            model.model,
+            low_rank_candidates,
+            w_bit,
+            q_config,
+            attn_topk_ratio=low_rank_attn_topk_ratio,
+            mlp_topk_ratio=low_rank_mlp_topk_ratio,
         )
 
     return mbq_results

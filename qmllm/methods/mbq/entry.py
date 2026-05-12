@@ -25,7 +25,8 @@ def mbq_entry(
     loss_mode: str = "mae",
     use_low_rank: bool = False,
     low_rank_rank: int = 16,
-    low_rank_topk_ratio: float = 0.4,
+    low_rank_attn_topk_ratio: float = 0.4,
+    low_rank_mlp_topk_ratio: float = 0.4,
     reweight_cache_path: str = None,
 ):
     """
@@ -60,7 +61,8 @@ def mbq_entry(
             distort=distort,
             use_low_rank=use_low_rank,
             low_rank_rank=low_rank_rank,
-            low_rank_topk_ratio=low_rank_topk_ratio,
+            low_rank_attn_topk_ratio=low_rank_attn_topk_ratio,
+            low_rank_mlp_topk_ratio=low_rank_mlp_topk_ratio,
         )
 
         dirpath = os.path.dirname(scale_path)

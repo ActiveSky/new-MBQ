@@ -20,16 +20,16 @@ __all__ = ["auto_scale_block", "apply_scale"]
 def get_weight_scale(weight, q_group_size=-1):
     """
     计算权重的逐通道重要性指标（per-channel weight importance）。
-    
+
     用于评估每个 channel 内权重的"不均匀程度"：
       scale[c] = mean(|W[c,i]| / max(|W[c,:]|))
     值越接近 1 说明该 channel 内权重分布越均匀，
     值越小说明该 channel 内有少数"主导"权重。
-    
+
     参数:
         weight:        权重矩阵，形状 [out_features, in_features]
         q_group_size:  分组量化的组大小，>0 时先将 weight reshape 为分组维度
-    
+
     返回:
         scale: 形状 [in_features] 的逐通道重要性向量
     """
@@ -39,8 +39,8 @@ def get_weight_scale(weight, q_group_size=-1):
         weight = weight.view(-1, q_group_size)
     # 每个元素除以所在行的最大值，得到 [0,1] 的相对权重
     scale = weight.abs() / weight.abs().amax(dim=1, keepdim=True)
-    scale = scale.view(org_shape)       # 恢复原始形状
-    scale = scale.mean(0)               # 沿 out_features 方向取均值 → 每个输入 channel 的重要性
+    scale = scale.view(org_shape)  # 恢复原始形状
+    scale = scale.mean(0)  # 沿 out_features 方向取均值 → 每个输入 channel 的重要性
     return scale
 
 
@@ -48,20 +48,20 @@ def get_weight_scale(weight, q_group_size=-1):
 def get_act_scale(x):
     """
     计算激活值的逐通道"活跃度"（per-channel activation magnitude）。
-    
+
     这是 AWQ/MBQ scale 搜索的核心输入——x_max 用于构造候选 scale。
-    
+
     运算: x.abs().view(-1, hidden).mean(0)
       - view(-1, hidden): 将所有 token 展平到第一个维度，保留 hidden 维度
       - mean(0):          沿 token 维度取平均 → 形状 [hidden]
-                          
+
     直观理解: x_max[c] = 所有 token 在第 c 个 channel 上的平均激活绝对值。
     值越大的 channel 说明激活越"活跃",指导接下来对weight的scale的选择。
     AWQ 假设: 激活中越活跃的 channel 对输出越重要,因此倾向于给这些对应的weight的  channel 分配更大的 scale（更高精度）。
-    
+
     参数:
         x: 激活值张量 [batch, seq_len, hidden] 或 [tokens, hidden]
-    
+
     返回:
         形状 [hidden] 的逐通道平均激活幅度
     """
@@ -72,15 +72,15 @@ def get_act_scale(x):
 def scale_ln_fcs(ln, fcs, scales):
     """
     SmoothQuant / AWQ 核心重参数化：将 scale 从 LN 迁移到后续 FC 层的权重中。
-    
+
     数学等价变换（Y = XW）：
       原始:  Y = LN(X) * W                    LN 输出直接进入 FC
       变换:  LN' = LN / scale               LN 权重缩小
              W'  = W * scale                FC 权重放大（等价于输入缩小）
              Y'  = LN'(X) * W' = LN(X) * W = Y  输出不变 ✓
-    
+
     这样做的目的：把激活值的动态范围"压缩"到权重中，减少激活量化的误差。
-    
+
     参数:
         ln:     LayerNorm 或 RMSNorm 层
         fcs:    后续的 Linear 层列表（一个 scale 可以同时影响多个 FC，如 QKV 或 gate+up）
@@ -89,16 +89,16 @@ def scale_ln_fcs(ln, fcs, scales):
     if not isinstance(fcs, list):
         fcs = [fcs]
 
-    scales = scales.to(ln.weight.device)    # 确保 scale 和 LN 在同一设备
+    scales = scales.to(ln.weight.device)  # 确保 scale 和 LN 在同一设备
 
     # LN 权重除以 scale：减小 LN 输出 → 等价于后续 FC 的输入变小
-    ln.weight.div_(scales)                   # 原地修改，shape: [hidden] / [hidden] → [hidden]
+    ln.weight.div_(scales)  # 原地修改，shape: [hidden] / [hidden] → [hidden]
     if hasattr(ln, "bias") and ln.bias is not None:
-        ln.bias.div_(scales)                 # bias 也要同步缩放
+        ln.bias.div_(scales)  # bias 也要同步缩放
 
     # FC 权重乘以 scale：补偿 LN 输出的缩小，保持输出值不变
     for fc in fcs:
-        fc.weight.mul_(scales.view(1, -1))   # [out, hidden] * [1, hidden] → 广播到每行
+        fc.weight.mul_(scales.view(1, -1))  # [out, hidden] * [1, hidden] → 广播到每行
 
     # NaN 检查：确保数值稳定性
     for p in ln.parameters():
@@ -112,20 +112,20 @@ def scale_ln_fcs(ln, fcs, scales):
 def scale_fc_fc(fc1, fc2, scales):
     """
     将 scale 从前一个 FC 的输出通道迁移到后一个 FC 的输入通道。
-    
+
     适用于: V_proj → O_proj, up_proj → down_proj 等 FC→FC 连接。
-    
+
     数学等价变换：
       原始:  h = fc1(x)              [tokens, intermediate]
              y = fc2(h)              [tokens, hidden]
       变换:  fc1' = fc1 / scale      fc1 的 output 变小
              fc2' = fc2 * scale      fc2 的 weight 变大（补偿 fc1 输出变小）
              y'  = fc2'(fc1'(x)) = y 输出不变 ✓
-    
+
     注意: fc1.weight[-scales.size(0):].div_(scales)
       InternLM2 的 wqkv 是 fused 的（Q+K+V 拼在一起），输出维度 = 3 × hidden，
       但 scale 只对应 Q 或 V 的部分（hidden 大小）。所以只对末尾 hidden 行做除法。
-    
+
     参数:
         fc1:    前一个 Linear 层
         fc2:    后一个 Linear 层
@@ -139,9 +139,11 @@ def scale_fc_fc(fc1, fc2, scales):
     # fc1 输出通道除以 scale（只影响末尾的 hidden 行，兼容 fused QKV）
     # fc1.weight 形状 [out_features, in_features]
     # fc1.weight[-scales.size(0):] 取出最后 hidden 行 → [hidden, in_features]
-    fc1.weight[-scales.size(0) :].div_(scales.view(-1, 1))  # [hidden, in] / [hidden, 1] → 广播到每列
+    fc1.weight[-scales.size(0) :].div_(
+        scales.view(-1, 1)
+    )  # [hidden, in] / [hidden, 1] → 广播到每列
     if fc1.bias is not None:
-        fc1.bias.div_(scales.view(-1))                       # bias 也要同步缩放
+        fc1.bias.div_(scales.view(-1))  # bias 也要同步缩放
 
     # fc2 输入通道乘以 scale：补偿 fc1 输出变小
     # fc2.weight 形状 [out, hidden]，scales.view(1, -1) → [1, hidden] 广播到每行
@@ -157,14 +159,14 @@ def scale_fc_fc(fc1, fc2, scales):
 def scale_gelu_fc(gelu, fc, scales):
     """
     将 scale 从 GELU 激活函数迁移到后续 FC 层（Bloom/OPT 模型专用）。
-    
+
     不同于 scale_ln_fcs（LN 有可学习的 weight 可以缩放），
     GELU 是纯函数没有参数，所以 scale 直接施加到 FC 权重上。
-    
+
     注意：这里只有 fc.weight *= scale，没有 GELU 侧的除法——
     因为 GELU 的输出是动态值，无法通过权重复参数化来"抵消"。
     这是近似处理，但实践中效果可接受。
-    
+
     参数:
         gelu:   GELU 或 BloomGelu 激活函数
         fc:     后续的 Linear 层
@@ -178,17 +180,28 @@ def scale_gelu_fc(gelu, fc, scales):
     for p in fc.parameters():
         assert torch.isnan(p).sum() == 0
 
+
 # MBQ新增的参数：vis_mask, reweight_ratio_dict, loss_mode="mae"
 # 内部函数几乎都增加了 reweight_ratio参数，其他没怎么变化
 @torch.no_grad()
-def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mask, vis_mask, reweight_ratio_dict, loss_mode="mae"):
+def auto_scale_block(
+    module,
+    module_kwargs,
+    w_bit,
+    q_config,
+    input_feat,
+    ans_mask,
+    vis_mask,
+    reweight_ratio_dict,
+    loss_mode="mae",
+):
     """
     MBQ 核心：对单个 transformer layer 自动搜索最优的逐通道 scale 因子。
-    
+
     整体流程：
       对 attention 和 MLP 各自的两组权重（LN→FC 和 FC→FC），
       在 50 个候选 ratio 中网格搜索，找到使量化后输出误差最小的 scale。
-    
+
     参数:
         module:               当前 transformer layer（如 InternLM2DecoderLayer）
         module_kwargs:        layer forward 的额外 kwargs（attention_mask, position_ids 等）
@@ -199,7 +212,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
         vis_mask:             视觉 token 的 mask（多模态）
         reweight_ratio_dict:  {"attn": ratio, "mlp": ratio}，视觉/文本误差的权重
         loss_mode:            "mse" 或 "mae"
-    
+
     返回:
         scales_list: list of (prev_op_name, (fc_names,), scale_tensor)
     """
@@ -229,10 +242,12 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
     # ============================================================
     # 内部函数：对一组 Linear 层搜索最优 scale
     # ============================================================
-    def _search_module_scale(block, linears2scale: list, x, reweight_ratio=None, kwargs={}):
+    def _search_module_scale(
+        block, linears2scale: list, x, reweight_ratio=None, kwargs={}
+    ):
         """
         对 block 内的 linears2scale 列表搜索最优 per-channel scale。
-        
+
         算法：网格搜索 50 个候选 ratio ∈ [0, 1]
           对每个 ratio:
             1. scales = x_max^ratio  （基于激活统计构造 scale）
@@ -240,21 +255,21 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
             3. 用修改后的权重跑 block forward，计算与原始输出的误差
             4. 恢复原始 state_dict
           选误差最小的 ratio 对应的 scales
-        
+
         参数:
             block:           被检查的模块（如 attention 或 mlp 子模块）
             linears2scale:   要施加 scale 的 Linear 层列表
             x:               输入激活值 [tokens, hidden_dim]
             reweight_ratio:  视觉 token 误差的权重系数
             kwargs:          block forward 的额外参数
-        
+
         返回:
             best_scales: 形状 [hidden_dim] 的逐通道最优 scale
         """
         # w: co, ci  (权重矩阵: 输出维度 × 输入维度)
         # x: n, ci   (激活值: token数 × 输入维度)
         x = x.to(next(block.parameters()).device)  # 确保 x 和 block 在同一设备
-        
+
         # 记录原始输出（未量化时的 ground truth）
         with torch.no_grad():
             org_out = block(x, **kwargs)
@@ -267,27 +282,26 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
         x_max = get_act_scale(x)
 
         best_error = float("inf")  # 当前最优误差
-        best_ratio = -1            # 最优 ratio
-        best_scales = None         # 最优 scale 张量
+        best_ratio = -1  # 最优 ratio
+        best_scales = None  # 最优 scale 张量
 
         # n_grid = 20
-        n_grid = 50  # MBQ 增加到 50 档，更精细的搜索（尤其对 2bit 量化）
+        n_grid = 50  # 第一阶段：全局粗搜 50 档（尤其对 2bit 量化）
+        local_refine_grid = 11  # 第二阶段：在最优点附近再做局部细搜
+        local_refine_half_span = 1 / n_grid
         history = []  # 记录所有 ratio 的 loss，用于调试
 
         # 保存原始 state_dict，每次迭代结束后恢复
         org_sd = {k: v.cpu() for k, v in block.state_dict().items()}
-        
-        for ratio in range(n_grid):
-            # ratio ∈ {0, 0.02, 0.04, ..., 0.98}
-            ratio = ratio * 1 / n_grid
-            
+
+        def _evaluate_scale_ratio(ratio):
             # ---- 构造候选 scale ----
             # scales = x_max^ratio，ratio 越大 scale 越接近激活分布
             # clamp 防止极小值导致数值不稳定
             # 归一化使得 scales 的几何均值 ≈ 1，避免整体放大/缩小
             scales = x_max.pow(ratio).clamp(min=1e-4).view(-1)
-            scales = scales / (scales.max() * scales.min()).sqrt() #归一化
-            
+            scales = scales / (scales.max() * scales.min()).sqrt()  # 归一化
+
             # ---- 临时对权重施加 scale + 伪量化 ----
             # 流程：W' = Q(W * scale) / scale
             #   1. W *= scale      → 把 scale 迁移到权重
@@ -296,7 +310,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
             for fc in linears2scale:
                 fc.weight.mul_(scales.view(1, -1).to(fc.weight.device))
                 fc.weight.data = w_quantize_func(fc.weight.data) / (scales.view(1, -1))
-            
+
             # 用修改后的权重跑 forward，得到量化后的输出
             out = block(x, **kwargs)
             if isinstance(out, tuple):
@@ -312,70 +326,106 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
                 if ans_mask is not None and vis_mask is not None:
                     # 多模态 + reweight：分别计算答案区域和视觉区域的 MSE
                     # ans_mask/vis_mask 形状 [tokens]，True 表示该 token 属于对应区域
-                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)   # [tokens] → [tokens, hidden]
+                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(
+                        out
+                    )  # [tokens] → [tokens, hidden]
                     vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
-                    masked_diff_ans = ((org_out - out).float().pow(2) * ans_mask_expand)
-                    masked_diff_vis = ((org_out - out).float().pow(2) * vis_mask_expand)
+                    masked_diff_ans = (org_out - out).float().pow(2) * ans_mask_expand
+                    masked_diff_vis = (org_out - out).float().pow(2) * vis_mask_expand
                     if reweight_ratio is not None:
                         # L = L_ans / N_ans + r * L_vis / N_vis
-                        loss = masked_diff_ans.sum() / ans_mask_expand.sum() + reweight_ratio * (masked_diff_vis.sum() / vis_mask_expand.sum())
-                    else:
                         loss = (
-                            (org_out - out).float().pow(2).mean().item()
-                        ) 
-                elif ans_mask is not None and vis_mask is None: #和AWQ的代码一样
+                            masked_diff_ans.sum() / ans_mask_expand.sum()
+                            + reweight_ratio
+                            * (masked_diff_vis.sum() / vis_mask_expand.sum())
+                        )
+                    else:
+                        loss = (org_out - out).float().pow(2).mean().item()
+                elif ans_mask is not None and vis_mask is None:  # 和AWQ的代码一样
                     # AWQ 风格：只看答案 token 区域的 MSE
                     ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-                    masked_diff = ((org_out - out).float().pow(2) * ans_mask_expand)
-                    loss = masked_diff.sum() / ans_mask_expand.sum() 
+                    masked_diff = (org_out - out).float().pow(2) * ans_mask_expand
+                    loss = masked_diff.sum() / ans_mask_expand.sum()
                 else:
                     # 无 mask：全局 MSE
                     loss = (
                         (org_out - out).float().pow(2).mean().item()
                     )  # float prevents overflow
-            elif loss_mode == "mae": #MBQ增加的loss计算方式
+            elif loss_mode == "mae":  # MBQ增加的loss计算方式
                 # ----- MAE 模式：平均绝对误差（对离群值更鲁棒） -----
                 if ans_mask is not None and vis_mask is not None:
                     # 多模态 + reweight：分别计算答案区域和视觉区域的 MAE
                     ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
                     vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
-                    masked_diff_ans = ((org_out - out).float().abs() * ans_mask_expand)
-                    masked_diff_vis = ((org_out - out).float().abs() * vis_mask_expand)
+                    masked_diff_ans = (org_out - out).float().abs() * ans_mask_expand
+                    masked_diff_vis = (org_out - out).float().abs() * vis_mask_expand
                     if reweight_ratio is not None:
                         # L = (L_ans + r * L_vis) / (N_ans + N_vis)
                         # 注意：MAE 模式下分母是总 token 数，不同于 MSE 的分别归一化
-                        loss = (masked_diff_ans.sum() + reweight_ratio * masked_diff_vis.sum()) / (ans_mask_expand.sum() + vis_mask_expand.sum())
-                    else:
                         loss = (
-                            (org_out - out).float().abs().mean().item()
-                        ) 
+                            masked_diff_ans.sum()
+                            + reweight_ratio * masked_diff_vis.sum()
+                        ) / (ans_mask_expand.sum() + vis_mask_expand.sum())
+                    else:
+                        loss = (org_out - out).float().abs().mean().item()
                 elif ans_mask is not None and vis_mask is None:
                     # AWQ 风格：只看答案 token 区域的 MAE
                     ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-                    masked_diff = ((org_out - out).float().abs() * ans_mask_expand)
-                    loss = masked_diff.sum() / ans_mask_expand.sum() 
+                    masked_diff = (org_out - out).float().abs() * ans_mask_expand
+                    loss = masked_diff.sum() / ans_mask_expand.sum()
                 else:
                     # 无 mask：全局 MAE
                     loss = (
                         (org_out - out).float().abs().mean().item()
                     )  # float prevents overflow
 
+            # 恢复 block 的原始权重，准备下一个 ratio 的尝试
+            block.load_state_dict(org_sd)
+            return loss, scales
+
+        for ratio in range(n_grid):
+            # ratio ∈ {0, 0.02, 0.04, ..., 0.98}
+            ratio = ratio * 1 / n_grid
+            loss, scales = _evaluate_scale_ratio(ratio)
+
             # ---- 记录当前 ratio 的 loss 并追踪最优 ----
-            history.append(loss)
+            history.append((ratio, loss))
             is_best = loss < best_error
             if is_best:
                 best_error = loss
                 best_ratio = ratio
                 best_scales = scales
-            
-            # 恢复 block 的原始权重，准备下一个 ratio 的尝试
-            block.load_state_dict(org_sd)
-        
+
+        # 第二阶段：在粗搜最优点附近做局部精细化搜索。
+        # 判断条件：第一阶段已经找到有效最优 ratio，且局部细搜网格点数大于 1。
+        if best_ratio != -1 and local_refine_grid > 1:
+            # 计算局部搜索区间的左边界，确保不低于 0.0。
+            refine_left = max(0.0, best_ratio - local_refine_half_span)
+            # 计算局部搜索区间的右边界，确保不超过 1.0。
+            refine_right = min(1.0, best_ratio + local_refine_half_span)
+            # 在 [refine_left, refine_right] 区间内均匀生成 local_refine_grid 个候选 ratio。
+            for ratio in torch.linspace(
+                refine_left, refine_right, steps=local_refine_grid
+            ).tolist():
+                # 将 tensor 转为 Python 原生 float 类型。
+                ratio = float(ratio)
+                # 调用局部评估函数，计算当前 ratio 下的量化误差和对应的 scale 张量。
+                loss, scales = _evaluate_scale_ratio(ratio)
+                # 将当前 ratio 和 loss 记录到历史日志中，便于后续调试分析。
+                history.append((ratio, loss))
+                # 判断当前 loss 是否小于目前已知的最优误差。
+                is_best = loss < best_error
+                # 如果当前 ratio 更优，则更新最优误差、最优 ratio 和最优 scale。
+                if is_best:
+                    best_error = loss
+                    best_ratio = ratio
+                    best_scales = scales
+
         # 安全检查：确保至少找到了一个有效的 ratio
         if best_ratio == -1:
             print(history)
             raise Exception
-        
+
         # 展平为一维 [hidden_dim]
         best_scales = best_scales.view(-1)
 
@@ -385,10 +435,12 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
     # ============================================================
     # 内部函数：包装 _search_module_scale，返回带名称的格式化结果
     # ============================================================
-    def _auto_get_scale(prev_op, layers, inp, reweight_ratio=None, module2inspect=None, kwargs={}):
+    def _auto_get_scale(
+        prev_op, layers, inp, reweight_ratio=None, module2inspect=None, kwargs={}
+    ):
         """
         对一组 (prev_op → layers) 搜索最优 scale 并返回格式化结果。
-        
+
         参数:
             prev_op:         前驱操作（LN 或 Linear）
             layers:          要施加 scale 的 Linear 层列表
@@ -397,7 +449,7 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
             module2inspect:  用于检查输出误差的模块（默认取 layers[0]）
                              对 attention 和 mlp 通常传入整个子模块
             kwargs:          forward 的额外参数
-        
+
         返回:
             (prev_op_name, (layer_names,), scales_tensor)
               名称是相对于当前 module 的路径，如 "attention_norm"
@@ -409,13 +461,15 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
             assert len(layers) == 1
             module2inspect = layers[0]
 
-        scales = _search_module_scale(module2inspect, layers, inp, reweight_ratio, kwargs)
+        scales = _search_module_scale(
+            module2inspect, layers, inp, reweight_ratio, kwargs
+        )
         scales = scales.detach().cpu()
         # 使用 get_op_name 获取相对于 module 的层内路径名
         return (
-            get_op_name(module, prev_op),                          # 如 "attention_norm"
-            tuple([get_op_name(module, m) for m in layers]),       # 如 ("attention.wqkv",)
-            scales,                                                # [hidden_dim] 的 scale 向量
+            get_op_name(module, prev_op),  # 如 "attention_norm"
+            tuple([get_op_name(module, m) for m in layers]),  # 如 ("attention.wqkv",)
+            scales,  # [hidden_dim] 的 scale 向量
         )
 
     scales_list = []  # 收集本层所有 scale 搜索结果
@@ -783,8 +837,8 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
                 reweight_ratio=reweight_ratio_dict["mlp"],
             )
         )
-    
-    elif module.__class__.__name__ == "Qwen2VLDecoderLayer": #新加的Qwen2vl处理模块
+
+    elif module.__class__.__name__ == "Qwen2VLDecoderLayer":  # 新加的Qwen2vl处理模块
         # -------------------- Qwen2-VL 模型 --------------------
         # 结构与 Qwen2 相同，MBQ 新增的多模态模型适配
         # attention 输入: LN → Q,K,V
@@ -840,10 +894,10 @@ def auto_scale_block(module, module_kwargs, w_bit, q_config, input_feat, ans_mas
 def apply_scale(module, scales_list, input_feat_dict=None):
     """
     将搜索到的 scale 应用到模型权重上，并同步更新输入特征缓存。
-    
+
     这是 scale 搜索的"落地"步骤——之前在网格搜索中只是临时施加 scale，
     现在将最优 scale 永久写入模型权重。
-    
+
     参数:
         module:          完整模型（或父模块），用于 get_op_by_name 按名称查找子模块
         scales_list:     [(prev_op_name, (fc_names,), scales), ...]
@@ -866,7 +920,11 @@ def apply_scale(module, scales_list, input_feat_dict=None):
             assert len(layers) == 1
             scale_fc_fc(prev_op, layers[0], scales)
         # 兼容多种 RMSNorm 实现：LlamaRMSNorm, InternLM2RMSNorm, Qwen2RMSNorm 以及标准 LayerNorm
-        elif isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm)) or prev_op.__class__.__name__ == "InternLM2RMSNorm" or prev_op.__class__.__name__ == "Qwen2RMSNorm":
+        elif (
+            isinstance(prev_op, (nn.LayerNorm, LlamaRMSNorm))
+            or prev_op.__class__.__name__ == "InternLM2RMSNorm"
+            or prev_op.__class__.__name__ == "Qwen2RMSNorm"
+        ):
             # LN → FC 组：LN → QKV, LN → gate/up 等
             # LN 权重 /= scale, FC 权重 *= scale
             scale_ln_fcs(prev_op, layers, scales)

@@ -92,7 +92,11 @@ def parse_ppl_args():
         action="store_true",
         help="Apply MBQ pseudo quantization before PPL evaluation",
     )
-    parser.add_argument("--low_rank", action="store_true", help="Enable saved low-rank residual branch when loading MBQ state")
+    parser.add_argument(
+        "--low_rank",
+        action="store_true",
+        help="Enable saved low-rank residual branch when loading MBQ state",
+    )
 
     # Output arguments
     parser.add_argument(
@@ -272,8 +276,9 @@ def apply_mbq_quantization_to_model(model, quant_state, args):
             w_bit=args.w_bit,
             q_config=q_config,
             low_rank_results=quant_state.get("low_rank", []) if args.low_rank else None,
+            linear_bit_map=quant_state.get("linear_bit_map", {}),
         )
-    
+
     model.to_cuda()
 
     return model

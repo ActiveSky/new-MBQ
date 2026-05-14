@@ -1,4 +1,5 @@
 import os
+import time
 
 import torch
 import torch.nn as nn
@@ -30,6 +31,215 @@ __all__ = ["run_mbq"]
 
 
 @torch.no_grad()
+def _get_internvl2_candidate_specs():
+    return [
+        ("attention.wqkv", "attention_wqkv", "attn"),
+        ("attention.wo", "attention_wo", "attn"),
+        ("feed_forward.w1", "mlp_w1", "mlp"),
+        ("feed_forward.w3", "mlp_w3", "mlp"),
+        ("feed_forward.w2", "mlp_w2", "mlp"),
+    ]
+
+
+@torch.no_grad()
+def _compute_activation_aware_relative_error(
+    flat_input,
+    weight_fp,
+    residual_weight,
+    token_mask=None,
+):
+    if token_mask is not None:
+        token_mask = token_mask.reshape(-1).to(dtype=torch.bool).to(device=flat_input.device)
+        if token_mask.numel() != flat_input.shape[0]:
+            print(
+                "Error: token_mask length {} does not match number of tokens {}.".format(
+                    token_mask.numel(), flat_input.shape[0]
+                )
+            )
+            return None
+        flat_input = flat_input[token_mask]
+
+    if flat_input.numel() == 0:
+        return None
+
+    ref = torch.nn.functional.linear(flat_input, weight_fp)
+    err = torch.nn.functional.linear(flat_input, residual_weight)
+    numerator = err.float().pow(2).sum()
+    denominator = ref.float().pow(2).sum()
+    return float((numerator / denominator.clamp(min=1e-6)).item())
+
+
+@torch.no_grad()
+def _compute_multimodal_activation_aware_score(
+    module_input,
+    weight_fp,
+    weight_q,
+    token_ans_mask=None,
+    token_vis_mask=None,
+    reweight_ratio=None,
+    timing=None,
+):
+    flat_input = module_input.reshape(-1, module_input.shape[-1]).float()
+    transfer_start = time.perf_counter()
+    flat_input = flat_input.to(weight_fp.device)
+    if timing is not None:
+        timing["input_transfer"] += time.perf_counter() - transfer_start
+
+    residual_weight = (weight_fp - weight_q).float()
+
+    if token_ans_mask is None or token_vis_mask is None:
+        global_start = time.perf_counter()
+        global_score = _compute_activation_aware_relative_error(
+            flat_input, weight_fp, residual_weight
+        )
+        if timing is not None:
+            timing["score_global"] += time.perf_counter() - global_start
+        return global_score
+
+    ans_start = time.perf_counter()
+    ans_score = _compute_activation_aware_relative_error(
+        flat_input,
+        weight_fp,
+        residual_weight,
+        token_mask=token_ans_mask,
+    )
+    if timing is not None:
+        timing["score_ans"] += time.perf_counter() - ans_start
+
+    vis_start = time.perf_counter()
+    vis_score = _compute_activation_aware_relative_error(
+        flat_input,
+        weight_fp,
+        residual_weight,
+        token_mask=token_vis_mask,
+    )
+    if timing is not None:
+        timing["score_vis"] += time.perf_counter() - vis_start
+
+    if ans_score is None and vis_score is None:
+        return None
+    if ans_score is None:
+        ans_score = 0.0
+    if vis_score is None:
+        vis_score = 0.0
+
+    if reweight_ratio is None:
+        return ans_score + vis_score
+    return ans_score + float(reweight_ratio) * vis_score
+
+
+@torch.no_grad()
+def _collect_internvl2_linear_scores(
+    layer,
+    layer_name,
+    input_feat,
+    w_bit,
+    q_config,
+    ans_mask=None,
+    vis_mask=None,
+    reweight_ratio_dict=None,
+    emit_timing=False,
+):
+    candidates = []
+    if layer.__class__.__name__ != "InternLM2DecoderLayer":
+        return candidates
+
+    timing = {
+        "pseudo_quant": 0.0,
+        "input_transfer": 0.0,
+        "score_global": 0.0,
+        "score_ans": 0.0,
+        "score_vis": 0.0,
+    }
+    call_start = time.perf_counter()
+
+    for module_name, module_type, module_family in _get_internvl2_candidate_specs():
+        if module_name not in input_feat:
+            continue
+
+        module = get_op_by_name(layer, module_name)
+        if module is None or not isinstance(module, nn.Linear):
+            continue
+
+        weight_fp = module.weight.data.detach().float()
+        quant_start = time.perf_counter()
+        weight_q = pseudo_quantize_tensor(
+            weight_fp, n_bits=w_bit, inplace=False, **q_config
+        )
+        timing["pseudo_quant"] += time.perf_counter() - quant_start
+
+        reweight_ratio = None
+        if reweight_ratio_dict is not None:
+            reweight_ratio = reweight_ratio_dict.get(module_family)
+
+        score = _compute_multimodal_activation_aware_score(
+            input_feat[module_name],
+            weight_fp,
+            weight_q,
+            token_ans_mask=ans_mask,
+            token_vis_mask=vis_mask,
+            reweight_ratio=reweight_ratio,
+            timing=timing,
+        )
+        if score is None:
+            continue
+
+        candidates.append(
+            {
+                "name": layer_name + "." + module_name,
+                "score": float(score),
+                "module_type": module_type,
+                "module_family": module_family,
+                "w_bit": int(w_bit),
+            }
+        )
+
+    if emit_timing:
+        call_elapsed = time.perf_counter() - call_start
+        print(
+            "[Timing] layer {} linear scores: total={:.3f}s, "
+            "pseudo_quant={:.3f}s, input_transfer={:.3f}s, "
+            "score_global={:.3f}s, score_ans={:.3f}s, score_vis={:.3f}s".format(
+                layer_name,
+                call_elapsed,
+                timing["pseudo_quant"],
+                timing["input_transfer"],
+                timing["score_global"],
+                timing["score_ans"],
+                timing["score_vis"],
+            ),
+            flush=True,
+        )
+
+    return candidates
+
+
+def _build_linear_bit_map(
+    linear_score_entries,
+    default_w_bit,
+    high_w_bit,
+    keep_ratio,
+):
+    keep_ratio = max(0.0, min(1.0, float(keep_ratio)))
+    sorted_entries = sorted(
+        linear_score_entries, key=lambda item: item["score"], reverse=True
+    )
+    keep_count = min(
+        len(sorted_entries),
+        max(0, int(np.ceil(len(sorted_entries) * keep_ratio))),
+    )
+    high_precision_names = {
+        item["name"] for item in sorted_entries[:keep_count]
+    }
+    linear_bit_map = {}
+    for item in sorted_entries:
+        linear_bit_map[item["name"]] = (
+            int(high_w_bit) if item["name"] in high_precision_names else int(default_w_bit)
+        )
+    return linear_bit_map
+
+
+@torch.no_grad()
 def _collect_internvl2_low_rank_candidates(
     layer,
     layer_name,
@@ -58,189 +268,23 @@ def _collect_internvl2_low_rank_candidates(
     返回:
         candidates: 一个列表；每个字典表示当前层里一个可用于 low-rank 补偿的候选线性层。
     """
-    # 初始化候选列表；保持列表接口便于把 attention 和 MLP 一起统一排序选 top-k。
+    linear_scores = _collect_internvl2_linear_scores(
+        layer=layer,
+        layer_name=layer_name,
+        input_feat=input_feat,
+        w_bit=w_bit,
+        q_config=q_config,
+        ans_mask=ans_mask,
+        vis_mask=vis_mask,
+        reweight_ratio_dict=reweight_ratio_dict,
+        emit_timing=True,
+    )
     candidates = []
-    # 只在 InternLM2DecoderLayer 上启用当前逻辑，避免误作用到其他架构。
-    if layer.__class__.__name__ != "InternLM2DecoderLayer":
-        return candidates
-    # (module_name, module_type, module_family)
-    # module_family 同时用作 reweight_key，因为当前 attention / MLP 的权重系数也是 attn / mlp。
-    candidate_specs = [
-        ("attention.wqkv", "attention_wqkv", "attn"),
-        ("feed_forward.w1", "mlp_w1", "mlp"),
-        ("feed_forward.w3", "mlp_w3", "mlp"),
-        ("feed_forward.w2", "mlp_w2", "mlp"),
-    ]
-
-    def _compute_activation_aware_relative_error(
-        flat_input,
-        weight_fp,
-        residual_weight,
-        token_mask=None,
-        chunk_size=1024,
-    ):
-        # 如果传入了 token_mask，只保留被选中的 token 的激活值。
-        if token_mask is not None:
-            token_mask = token_mask.reshape(-1).to(dtype=torch.bool)
-            # 如果 mask 形状与 token 总数不匹配，说明 mask 与输入不兼容，直接返回 None。
-            if token_mask.numel() != flat_input.shape[0]:
-                return None
-            # 用 mask 筛选出有效的激活值（例如只保留 answer 或 vision 区域）。
-            flat_input = flat_input[token_mask]
-
-        # 如果筛选后没有剩余 token，无法计算相对误差，返回 None。
-        if flat_input.numel() == 0:
-            return None
-
-        # 把计算放到权重所在的设备上，避免反复搬运。
-        device = weight_fp.device
-        # numerator 累积量化后的输出误差能量：||X(W - Wq)||²。
-        numerator = torch.zeros((), dtype=torch.float32, device=device)
-        # denominator 累积原始输出能量：||XW||²，用于归一化。
-        denominator = torch.zeros((), dtype=torch.float32, device=device)
-        # 分块计算，避免单次矩阵乘法占用过多显存。
-        for start in range(0, flat_input.shape[0], chunk_size):
-            feat_chunk = flat_input[start : start + chunk_size].to(
-                device, non_blocking=True
-            )
-            ref_chunk = torch.nn.functional.linear(feat_chunk, weight_fp)
-            err_chunk = torch.nn.functional.linear(feat_chunk, residual_weight)
-            numerator += err_chunk.float().pow(2).sum()
-            denominator += ref_chunk.float().pow(2).sum()
-
-        # 返回相对误差：||X(W - Wq)||² / ||XW||²。
-        # clamp 防止分母接近 0 导致除零异常。
-        return float((numerator / denominator.clamp(min=1e-6)).item())
-
-    def _compute_multimodal_activation_aware_score(
-        module_input,
-        weight_fp,
-        weight_q,
-        token_ans_mask=None,
-        token_vis_mask=None,
-        reweight_ratio=None,
-    ):
-        # 将输入激活展平为 [所有 token, hidden_dim]，并转为 float 保证精度。
-        flat_input = module_input.reshape(-1, module_input.shape[-1]).float()
-        # 计算量化造成的权重残差矩阵：W - Wq。
-        residual_weight = (weight_fp - weight_q).float()
-
-        # 先计算全局（所有 token）的激活感知相对误差。
-        global_score = _compute_activation_aware_relative_error(
-            flat_input,
-            weight_fp,
-            residual_weight,
-        )
-        # 如果没有多模态 mask（纯文本场景），直接返回全局误差作为得分。
-        if token_ans_mask is None or token_vis_mask is None:
-            return global_score
-
-        # 计算只在 answer（caption）token 上的激活感知相对误差。
-        # 这衡量了该层量化对文本输出质量的直接影响。
-        ans_score = _compute_activation_aware_relative_error(
-            flat_input,
-            weight_fp,
-            residual_weight,
-            token_mask=token_ans_mask,
-        )
-        # 计算只在视觉 token 上的激活感知相对误差。
-        # 这衡量了该层量化对视觉理解质量的直接影响。
-        vis_score = _compute_activation_aware_relative_error(
-            flat_input,
-            weight_fp,
-            residual_weight,
-            token_mask=token_vis_mask,
-        )
-
-        # 如果某个区域的 mask 筛选后没有可用 token，就用另一个区域的得分代替。
-        if ans_score is None and vis_score is None:
-            return global_score
-        if ans_score is None:
-            return vis_score
-        if vis_score is None:
-            return ans_score
-        # 如果没有 reweight 系数，直接简单相加。
-        if reweight_ratio is None:
-            return ans_score + vis_score
-        # 用 reweight 系数加权合并：L = L_ans + lambda * L_vis。
-        # lambda 越大，视觉区域的量化误差在候选评分中权重越高。
-        return ans_score + float(reweight_ratio) * vis_score
-
-    for module_name, module_type, module_family in candidate_specs:
-        # 当前前向过程中没有缓存到该线性层输入特征，说明这条路径当前不可用，直接跳过。
-        if module_name not in input_feat:
-            continue
-
-        module = get_op_by_name(layer, module_name)
-        if module is None or not isinstance(module, nn.Linear):
-            continue
-
-        # 读取 apply_scale 之后的浮点权重；这里 detach + float，是为了后续稳定做误差评估。
-        weight_fp = module.weight.data.detach().float()
-        # 用与真实部署一致的量化配置做一次伪量化，得到 2bit / 4bit 等主路径上的量化权重。
-        weight_q = pseudo_quantize_tensor(
-            weight_fp, n_bits=w_bit, inplace=False, **q_config
-        )
-        reweight_ratio = None
-        if reweight_ratio_dict is not None:
-            reweight_ratio = reweight_ratio_dict.get(module_family)
-
-        # 分数越大，表示该层在真实多模态激活下量化后丢失的信息越多，越值得进入后续 top-k low-rank 补偿。
-        score = _compute_multimodal_activation_aware_score(
-            input_feat[module_name],
-            weight_fp,
-            weight_q,
-            token_ans_mask=ans_mask,
-            token_vis_mask=vis_mask,
-            reweight_ratio=reweight_ratio,
-        )
-
-        # 把当前层登记为候选项；这里只保存轻量信息，真正的 SVD 会在 top-k 选完后再统一做。
-        candidates.append(
-            {
-                # 保存完整模块路径，后续构建 low-rank 状态时会据此重新拿回真实模块。
-                "name": layer_name + "." + module_name,
-                # 保存当前层的量化残差分数，供后续排序选 top-k。
-                "score": float(score.item()),
-                # 当前版本先使用固定 rank；真正构建状态时仍会再和最大可分解 rank 取 min。
-                "rank": int(rank),
-                # 保存模块类型，便于后续打印 attention / MLP 的候选与入选统计。
-                "module_type": module_type,
-                # 保存模块族，供 attention / MLP 分桶 top-k 使用。
-                "module_family": module_family,
-            }
-        )
-
-    # 返回当前层收集到的候选结果。
+    for item in linear_scores:
+        candidate = dict(item)
+        candidate["rank"] = int(rank)
+        candidates.append(candidate)
     return candidates
-
-
-def _select_low_rank_candidates(
-    candidates,
-    attn_topk_ratio=0.4,
-    mlp_topk_ratio=0.4,
-):
-    def _take_topk(group_candidates, ratio):
-        ratio = max(0.0, min(1.0, float(ratio)))
-        if not group_candidates or ratio <= 0:
-            return []
-        topk_count = int(np.ceil(len(group_candidates) * ratio))
-        topk_count = min(len(group_candidates), max(0, topk_count))
-        return sorted(group_candidates, key=lambda item: item["score"], reverse=True)[
-            :topk_count
-        ]
-
-    attn_ratio = float(attn_topk_ratio)
-    mlp_ratio = float(mlp_topk_ratio)
-    attn_candidates = [
-        item for item in candidates if item.get("module_family") == "attn"
-    ]
-    mlp_candidates = [item for item in candidates if item.get("module_family") == "mlp"]
-
-    selected = []
-    selected.extend(_take_topk(attn_candidates, attn_ratio))
-    selected.extend(_take_topk(mlp_candidates, mlp_ratio))
-    return sorted(selected, key=lambda item: item["score"], reverse=True)
 
 
 @torch.no_grad()
@@ -273,6 +317,36 @@ def _build_low_rank_states(
     返回:
         low_rank_results: 每个选中层对应一个字典，包含 name / rank / score / up / down。
     """
+
+    def _select_low_rank_candidates(
+        candidates,
+        attn_topk_ratio=0.4,
+        mlp_topk_ratio=0.4,
+    ):
+        def _take_topk(group_candidates, ratio):
+            ratio = max(0.0, min(1.0, float(ratio)))
+            if not group_candidates or ratio <= 0:
+                return []
+            topk_count = int(np.ceil(len(group_candidates) * ratio))
+            topk_count = min(len(group_candidates), max(0, topk_count))
+            return sorted(
+                group_candidates, key=lambda item: item["score"], reverse=True
+            )[:topk_count]
+
+        attn_ratio = float(attn_topk_ratio)
+        mlp_ratio = float(mlp_topk_ratio)
+        attn_candidates = [
+            item for item in candidates if item.get("module_family") == "attn"
+        ]
+        mlp_candidates = [
+            item for item in candidates if item.get("module_family") == "mlp"
+        ]
+
+        selected = []
+        selected.extend(_take_topk(attn_candidates, attn_ratio))
+        selected.extend(_take_topk(mlp_candidates, mlp_ratio))
+        return sorted(selected, key=lambda item: item["score"], reverse=True)
+
     # 如果没有任何候选层，直接返回空列表。
     if not candidates:
         return []
@@ -638,6 +712,9 @@ def run_mbq(
     low_rank_rank=16,
     low_rank_attn_topk_ratio=0.4,
     low_rank_mlp_topk_ratio=0.4,
+    linear_mixed_probe=False,
+    linear_probe_high_bit=4,
+    linear_probe_keep_ratio=0.5,
 ):
     if "bigcode" in str(model.model.__class__).lower():
         # otherwise attention_mask will always be on cpu.
@@ -690,8 +767,11 @@ def run_mbq(
     mbq_results = {
         "scale": [],
         "low_rank": [],
+        "linear_score_map": {},
+        "linear_bit_map": {},
     }
     low_rank_candidates = []
+    linear_score_entries = []
 
     # ===========MBQ:下面reweight和distort都是新增
     if reweight:
@@ -898,6 +978,20 @@ def run_mbq(
                     )
                 )
 
+            if linear_mixed_probe and (not wa_quant):
+                linear_score_entries.extend(
+                    _collect_internvl2_linear_scores(
+                        layer=layer,
+                        layer_name=get_op_name(model.model, layer),
+                        input_feat=input_feat,
+                        w_bit=w_bit,
+                        q_config=q_config,
+                        ans_mask=caption_mask,
+                        vis_mask=vision_mask,
+                        reweight_ratio_dict=scale_reweight_ratio_dict,
+                    )
+                )
+
             # =========新增
             if distort:
                 # get distort output as next layer's input
@@ -964,6 +1058,23 @@ def run_mbq(
             q_config,
             attn_topk_ratio=low_rank_attn_topk_ratio,
             mlp_topk_ratio=low_rank_mlp_topk_ratio,
+        )
+
+    if linear_mixed_probe and linear_score_entries:
+        mbq_results["linear_score_map"] = {
+            item["name"]: {
+                "score": item["score"],
+                "module_type": item["module_type"],
+                "module_family": item["module_family"],
+                "w_bit": item["w_bit"],
+            }
+            for item in linear_score_entries
+        }
+        mbq_results["linear_bit_map"] = _build_linear_bit_map(
+            linear_score_entries,
+            default_w_bit=w_bit,
+            high_w_bit=linear_probe_high_bit,
+            keep_ratio=linear_probe_keep_ratio,
         )
 
     return mbq_results

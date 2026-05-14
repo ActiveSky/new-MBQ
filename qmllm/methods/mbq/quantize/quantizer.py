@@ -65,18 +65,24 @@ def pseudo_quantize_model_weight(
     w_bit,
     q_config,
     low_rank_results=None,
+    layer_bit_map=None,
+    linear_bit_map=None,
 ):
     from .pre_quant import get_blocks, get_named_linears
     from qmllm.utils.search import get_op_name
 
     layers = get_blocks(model)
     low_rank_results = low_rank_results or []
+    override_bit_map = {}
+    override_bit_map.update(layer_bit_map or {})
+    override_bit_map.update(linear_bit_map or {})
     low_rank_map = {item["name"]: item for item in low_rank_results}
     for i in tqdm(range(len(layers)), desc="pseudo weight quantization..."):
         layer_name = get_op_name(model, layers[i])
         named_linears = get_named_linears(layers[i])
         for n, m in named_linears.items():
             full_name = layer_name + "." + n
+            linear_w_bit = int(override_bit_map.get(full_name, w_bit))
 
             if full_name in low_rank_map:
                 low_rank_state = low_rank_map[full_name]
@@ -84,7 +90,7 @@ def pseudo_quantize_model_weight(
                     m,
                     low_rank_state,
                     weight_quant="per_group",
-                    w_bit=w_bit,
+                    w_bit=linear_w_bit,
                     weight_group=q_config.get("q_group_size", 128),
                 )
                 father_module = get_module_by_name_suffix(
@@ -94,7 +100,7 @@ def pseudo_quantize_model_weight(
                 del new_linear, m
             else:
                 m.weight.data = pseudo_quantize_tensor(
-                    m.weight.data, n_bits=w_bit, **q_config
+                    m.weight.data, n_bits=linear_w_bit, **q_config
                 )
 
 
@@ -117,8 +123,16 @@ def pseudo_quantize_model_weight_act(
     for i in tqdm(range(len(layers)), desc="pseudo weight activation quantization..."):
         named_linears = get_named_linears(layers[i])
         for n, m in named_linears.items():
-            new_linear = WALinear.from_float(m, weight_quant="per_channel", act_quant="per_token", w_bit=w_bit, a_bit=a_bit)
-            father_module = get_module_by_name_suffix(layers[i], '.'.join(n.split(".")[:-1]))
-            setattr(father_module, n.split('.')[-1], new_linear)
+            new_linear = WALinear.from_float(
+                m,
+                weight_quant="per_channel",
+                act_quant="per_token",
+                w_bit=w_bit,
+                a_bit=a_bit,
+            )
+            father_module = get_module_by_name_suffix(
+                layers[i], ".".join(n.split(".")[:-1])
+            )
+            setattr(father_module, n.split(".")[-1], new_linear)
             del new_linear, m
             torch.cuda.empty_cache()

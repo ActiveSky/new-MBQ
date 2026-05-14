@@ -28,6 +28,9 @@ def mbq_entry(
     low_rank_attn_topk_ratio: float = 0.4,
     low_rank_mlp_topk_ratio: float = 0.4,
     reweight_cache_path: str = None,
+    linear_mixed_probe: bool = False,
+    linear_probe_high_bit: int = 4,
+    linear_probe_keep_ratio: float = 0.5,
 ):
     """
     model: here the model is the LLM, you have to extract the LLM first!
@@ -63,6 +66,9 @@ def mbq_entry(
             low_rank_rank=low_rank_rank,
             low_rank_attn_topk_ratio=low_rank_attn_topk_ratio,
             low_rank_mlp_topk_ratio=low_rank_mlp_topk_ratio,
+            linear_mixed_probe=linear_mixed_probe,
+            linear_probe_high_bit=linear_probe_high_bit,
+            linear_probe_keep_ratio=linear_probe_keep_ratio,
         )
 
         dirpath = os.path.dirname(scale_path)
@@ -86,6 +92,7 @@ def mbq_entry(
                 w_bit=w_bit,
                 q_config=q_config,
                 low_rank_results=mbq_results.get("low_rank", []),
+                linear_bit_map=mbq_results.get("linear_bit_map", {}),
             )
         else:
             # weight activation quantization

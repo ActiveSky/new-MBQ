@@ -50,6 +50,9 @@ def qwrapper(model, prompt_inputs, prompt_kwargs, args):
             low_rank_rank=args.low_rank_rank,
             low_rank_attn_topk_ratio=args.low_rank_attn_topk_ratio,
             low_rank_mlp_topk_ratio=args.low_rank_mlp_topk_ratio,
+            linear_mixed_probe=args.linear_mixed_probe,
+            linear_probe_high_bit=args.linear_probe_high_bit,
+            linear_probe_keep_ratio=args.linear_probe_keep_ratio,
         )
     elif args.method == "rtn":
         wa_quant = args.w_bit < 16 and args.a_bit < 16

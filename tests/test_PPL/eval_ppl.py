@@ -97,6 +97,11 @@ def parse_ppl_args():
         action="store_true",
         help="Enable saved low-rank residual branch when loading MBQ state",
     )
+    parser.add_argument(
+        "--mixed_probe",
+        action="store_true",
+        help="Enable per-linear mixed-bit from saved state (score top-N%% → higher bit)",
+    )
 
     # Output arguments
     parser.add_argument(
@@ -266,6 +271,27 @@ def apply_mbq_quantization_to_model(model, quant_state, args):
         raise ValueError("MBQ evaluation requires a saved scale_path")
 
     apply_mbq(base_model, quant_state)
+
+    linear_bit_map = {}
+    if args.mixed_probe:
+        linear_bit_map = quant_state.get("linear_bit_map", {})
+        if linear_bit_map:
+            bit_counts = {}
+            for v in linear_bit_map.values():
+                bit_counts[v] = bit_counts.get(v, 0) + 1
+            bits_summary = ", ".join(
+                f"{c}×{b}bit" for b, c in sorted(bit_counts.items())
+            )
+            logger.info(
+                f"Mixed-probe enabled: {len(linear_bit_map)} linears with per-linear bits ({bits_summary})"
+            )
+        else:
+            logger.info(
+                "Mixed-probe: no linear_bit_map found in state, using uniform w_bit"
+            )
+    else:
+        logger.info("Using uniform w_bit (mixed-probe not enabled)")
+
     if wa_quant:
         mbq_pseudo_quantize_model_weight_act(
             base_model, w_bit=args.w_bit, a_bit=args.a_bit
@@ -276,7 +302,7 @@ def apply_mbq_quantization_to_model(model, quant_state, args):
             w_bit=args.w_bit,
             q_config=q_config,
             low_rank_results=quant_state.get("low_rank", []) if args.low_rank else None,
-            linear_bit_map=quant_state.get("linear_bit_map", {}),
+            linear_bit_map=linear_bit_map,
         )
 
     model.to_cuda()
@@ -315,6 +341,7 @@ def evaluate_single_dataset(model, tokenizer, dataset_name: str, args) -> Dict:
         "a_bit": args.a_bit,
         "quantized": args.pseudo_quant,
         "method": "mbq" if args.pseudo_quant else "fp16",
+        "mixed_probe": args.mixed_probe if args.pseudo_quant else False,
     }
 
     logger.info(f"{dataset_name} Results: PPL={ppl:.4f}, NLL={nll:.4f}")
@@ -404,6 +431,7 @@ def main():
             "avg_nll": np.mean([r["nll"] for r in results_list]),
             "quantized": args.pseudo_quant,
             "method": "mbq" if args.pseudo_quant else "fp16",
+            "mixed_probe": args.mixed_probe if args.pseudo_quant else False,
         },
     }
 
@@ -420,6 +448,7 @@ def main():
             f"{result['dataset']}: PPL={result['ppl']:.4f} | "
             f"NLL={result['nll']:.4f} | "
             f"Method={result['method']}"
+            f"{' (mixed-probe)' if result.get('mixed_probe') else ''}"
         )
 
     logger.info(f"Average PPL: {output_data['summary']['avg_ppl']:.4f}")

@@ -42,34 +42,6 @@ def _get_internvl2_candidate_specs():
 
 
 @torch.no_grad()
-def _compute_activation_aware_relative_error(
-    flat_input,
-    weight_fp,
-    residual_weight,
-    token_mask=None,
-):
-    if token_mask is not None:
-        token_mask = token_mask.reshape(-1).to(dtype=torch.bool).to(device=flat_input.device)
-        if token_mask.numel() != flat_input.shape[0]:
-            print(
-                "Error: token_mask length {} does not match number of tokens {}.".format(
-                    token_mask.numel(), flat_input.shape[0]
-                )
-            )
-            return None
-        flat_input = flat_input[token_mask]
-
-    if flat_input.numel() == 0:
-        return None
-
-    ref = torch.nn.functional.linear(flat_input, weight_fp)
-    err = torch.nn.functional.linear(flat_input, residual_weight)
-    numerator = err.float().pow(2).sum()
-    denominator = ref.float().pow(2).sum()
-    return float((numerator / denominator.clamp(min=1e-6)).item())
-
-
-@torch.no_grad()
 def _compute_multimodal_activation_aware_score(
     module_input,
     weight_fp,
@@ -79,6 +51,27 @@ def _compute_multimodal_activation_aware_score(
     reweight_ratio=None,
     timing=None,
 ):
+    def _relative_error(flat_input, weight_fp, residual_weight, token_mask=None):
+        if token_mask is not None:
+            token_mask = (
+                token_mask.reshape(-1).to(dtype=torch.bool).to(device=flat_input.device)
+            )
+            if token_mask.numel() != flat_input.shape[0]:
+                print(
+                    "Error: token_mask length {} does not match number of tokens {}.".format(
+                        token_mask.numel(), flat_input.shape[0]
+                    )
+                )
+                return None
+            flat_input = flat_input[token_mask]
+        if flat_input.numel() == 0:
+            return None
+        ref = torch.nn.functional.linear(flat_input, weight_fp)
+        err = torch.nn.functional.linear(flat_input, residual_weight)
+        numerator = err.float().pow(2).sum()
+        denominator = ref.float().pow(2).sum()
+        return float((numerator / denominator.clamp(min=1e-6)).item())
+
     flat_input = module_input.reshape(-1, module_input.shape[-1]).float()
     transfer_start = time.perf_counter()
     flat_input = flat_input.to(weight_fp.device)
@@ -89,15 +82,13 @@ def _compute_multimodal_activation_aware_score(
 
     if token_ans_mask is None or token_vis_mask is None:
         global_start = time.perf_counter()
-        global_score = _compute_activation_aware_relative_error(
-            flat_input, weight_fp, residual_weight
-        )
+        global_score = _relative_error(flat_input, weight_fp, residual_weight)
         if timing is not None:
             timing["score_global"] += time.perf_counter() - global_start
         return global_score
 
     ans_start = time.perf_counter()
-    ans_score = _compute_activation_aware_relative_error(
+    ans_score = _relative_error(
         flat_input,
         weight_fp,
         residual_weight,
@@ -107,7 +98,7 @@ def _compute_multimodal_activation_aware_score(
         timing["score_ans"] += time.perf_counter() - ans_start
 
     vis_start = time.perf_counter()
-    vis_score = _compute_activation_aware_relative_error(
+    vis_score = _relative_error(
         flat_input,
         weight_fp,
         residual_weight,
@@ -228,63 +219,15 @@ def _build_linear_bit_map(
         len(sorted_entries),
         max(0, int(np.ceil(len(sorted_entries) * keep_ratio))),
     )
-    high_precision_names = {
-        item["name"] for item in sorted_entries[:keep_count]
-    }
+    high_precision_names = {item["name"] for item in sorted_entries[:keep_count]}
     linear_bit_map = {}
     for item in sorted_entries:
         linear_bit_map[item["name"]] = (
-            int(high_w_bit) if item["name"] in high_precision_names else int(default_w_bit)
+            int(high_w_bit)
+            if item["name"] in high_precision_names
+            else int(default_w_bit)
         )
     return linear_bit_map
-
-
-@torch.no_grad()
-def _collect_internvl2_low_rank_candidates(
-    layer,
-    layer_name,
-    input_feat,
-    w_bit,
-    q_config,
-    rank,
-    ans_mask=None,
-    vis_mask=None,
-    reweight_ratio_dict=None,
-):
-    """收集 InternVL2 / InternLM2 的 low-rank 候选层。
-
-    这个函数当前只负责“打分”，不真正计算 SVD。
-    它会对当前 layer 中预定义的 attention / MLP 线性层做一次与真实部署一致的伪量化，
-    然后根据权重残差 `W - W_q` 的相对大小，得到这些层是否值得进入 top-k 的分数。
-
-    参数:
-        layer: 当前正在处理的 transformer block。
-        layer_name: 当前 block 在完整模型中的路径名。
-        input_feat: 当前 block 缓存到的各线性层输入特征，当前函数里用于判断目标模块是否存在可用输入。
-        w_bit: 权重量化 bit 数。
-        q_config: 当前量化配置，如 group size、zero point 等。
-        rank: 如果该层后续被选中，预期分配给它的固定 low-rank rank。
-
-    返回:
-        candidates: 一个列表；每个字典表示当前层里一个可用于 low-rank 补偿的候选线性层。
-    """
-    linear_scores = _collect_internvl2_linear_scores(
-        layer=layer,
-        layer_name=layer_name,
-        input_feat=input_feat,
-        w_bit=w_bit,
-        q_config=q_config,
-        ans_mask=ans_mask,
-        vis_mask=vis_mask,
-        reweight_ratio_dict=reweight_ratio_dict,
-        emit_timing=True,
-    )
-    candidates = []
-    for item in linear_scores:
-        candidate = dict(item)
-        candidate["rank"] = int(rank)
-        candidates.append(candidate)
-    return candidates
 
 
 @torch.no_grad()
@@ -963,34 +906,28 @@ def run_mbq(
             # apply_scale(layer, scales_list, input_feat_dict=input_feat)
             apply_scale(layers[i], scales_list, input_feat_dict=input_feat)
 
-            if use_low_rank and (not wa_quant):
-                low_rank_candidates.extend(
-                    _collect_internvl2_low_rank_candidates(
-                        layer,
-                        get_op_name(model.model, layer),
-                        input_feat,
-                        w_bit,
-                        q_config,
-                        low_rank_rank,
-                        ans_mask=caption_mask,
-                        vis_mask=vision_mask,
-                        reweight_ratio_dict=scale_reweight_ratio_dict,
-                    )
+            if (use_low_rank or linear_mixed_probe) and (not wa_quant):
+                layer_name = get_op_name(model.model, layer)
+                layer_linear_scores = _collect_internvl2_linear_scores(
+                    layer=layer,
+                    layer_name=layer_name,
+                    input_feat=input_feat,
+                    w_bit=w_bit,
+                    q_config=q_config,
+                    ans_mask=caption_mask,
+                    vis_mask=vision_mask,
+                    reweight_ratio_dict=scale_reweight_ratio_dict,
+                    emit_timing=use_low_rank,
                 )
-
-            if linear_mixed_probe and (not wa_quant):
-                linear_score_entries.extend(
-                    _collect_internvl2_linear_scores(
-                        layer=layer,
-                        layer_name=get_op_name(model.model, layer),
-                        input_feat=input_feat,
-                        w_bit=w_bit,
-                        q_config=q_config,
-                        ans_mask=caption_mask,
-                        vis_mask=vision_mask,
-                        reweight_ratio_dict=scale_reweight_ratio_dict,
+                if use_low_rank:
+                    low_rank_candidates.extend(
+                        [
+                            {**item, "rank": int(low_rank_rank)}
+                            for item in layer_linear_scores
+                        ]
                     )
-                )
+                if linear_mixed_probe:
+                    linear_score_entries.extend(layer_linear_scores)
 
             # =========新增
             if distort:

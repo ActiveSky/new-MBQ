@@ -230,6 +230,119 @@ def _build_linear_bit_map(
     return linear_bit_map
 
 
+def _normalize_svd_quant_config(svd_quant_config):
+    if svd_quant_config is None:
+        svd_quant_config = {}
+    if not isinstance(svd_quant_config, dict):
+        raise TypeError("svd_quant_config must be a dict when svd_quant is enabled.")
+
+    default_factor_config = {
+        "weight_quant": "per_channel",
+        "quant_bit": 8,
+        "zero_point": False,
+        "q_group_size": -1,
+    }
+    shared_config = {
+        key: value
+        for key, value in svd_quant_config.items()
+        if key not in {"up", "down"}
+    }
+    default_axis = {"up": "out_channel", "down": "in_channel"}
+    normalized = {}
+
+    for factor_name in ("up", "down"):
+        factor_config = dict(default_factor_config)
+        factor_config.update(shared_config)
+        user_config = svd_quant_config.get(factor_name, {})
+        if not isinstance(user_config, dict):
+            raise TypeError(
+                "svd_quant_config['{}'] must be a dict.".format(factor_name)
+            )
+        factor_config.update(user_config)
+        factor_config.setdefault("quant_axis", default_axis[factor_name])
+        factor_config["weight_quant"] = str(factor_config["weight_quant"]).lower()
+        factor_config["quant_axis"] = str(factor_config["quant_axis"]).lower()
+        factor_config["quant_bit"] = int(factor_config["quant_bit"])
+        factor_config["q_group_size"] = int(factor_config.get("q_group_size", -1))
+        factor_config["zero_point"] = bool(factor_config.get("zero_point", False))
+        normalized[factor_name] = factor_config
+
+    return normalized
+
+
+@torch.no_grad()
+def _pseudo_quantize_svd_factor(tensor, factor_name, factor_config):
+    weight_quant = factor_config["weight_quant"]
+    quant_bit = factor_config["quant_bit"]
+    quant_axis = factor_config["quant_axis"]
+    zero_point = factor_config["zero_point"]
+    q_group_size = factor_config["q_group_size"]
+
+    if quant_bit >= 16:
+        return tensor
+
+    if weight_quant not in {"per_channel", "per_group", "per_tensor"}:
+        raise ValueError(
+            "Invalid SVD {} weight_quant '{}'. Use per_channel, per_group, "
+            "or per_tensor.".format(factor_name, weight_quant)
+        )
+
+    transpose = False
+    if factor_name == "up":
+        if quant_axis in {"out_channel", "row"}:
+            transpose = False
+        elif quant_axis in {"rank_channel", "col"}:
+            transpose = True
+        else:
+            raise ValueError(
+                "Invalid SVD up quant_axis '{}'. Use out_channel or "
+                "rank_channel.".format(quant_axis)
+            )
+    elif factor_name == "down":
+        if quant_axis in {"rank_channel", "row"}:
+            transpose = False
+        elif quant_axis in {"in_channel", "col"}:
+            transpose = True
+        else:
+            raise ValueError(
+                "Invalid SVD down quant_axis '{}'. Use in_channel or "
+                "rank_channel.".format(quant_axis)
+            )
+    else:
+        raise ValueError("Unknown SVD factor '{}'.".format(factor_name))
+
+    quant_input = tensor.transpose(0, 1).contiguous() if transpose else tensor
+
+    if weight_quant == "per_tensor":
+        quantized = pseudo_quantize_tensor(
+            quant_input,
+            n_bits=quant_bit,
+            zero_point=zero_point,
+            q_group_size=-1,
+            per_tensor=True,
+            inplace=False,
+        )
+    else:
+        group_size = q_group_size if weight_quant == "per_group" else -1
+        if group_size > 0 and quant_input.shape[-1] % group_size != 0:
+            raise ValueError(
+                "SVD {} per_group quantization requires the last dimension "
+                "({}) to be divisible by q_group_size ({}).".format(
+                    factor_name, quant_input.shape[-1], group_size
+                )
+            )
+        quantized = pseudo_quantize_tensor(
+            quant_input,
+            n_bits=quant_bit,
+            zero_point=zero_point,
+            q_group_size=group_size,
+            per_tensor=False,
+            inplace=False,
+        )
+
+    return quantized.transpose(0, 1).contiguous() if transpose else quantized
+
+
 @torch.no_grad()
 def _build_low_rank_states(
     model,
@@ -238,6 +351,8 @@ def _build_low_rank_states(
     q_config,
     attn_topk_ratio=0.4,
     mlp_topk_ratio=0.4,
+    svd_quant=False,
+    svd_quant_config=None,
 ):
     """根据候选层分数，真正构建可保存的 low-rank SVD 状态。
 
@@ -289,6 +404,11 @@ def _build_low_rank_states(
         selected.extend(_take_topk(attn_candidates, attn_ratio))
         selected.extend(_take_topk(mlp_candidates, mlp_ratio))
         return sorted(selected, key=lambda item: item["score"], reverse=True)
+
+    normalized_svd_quant_config = None
+    if svd_quant:
+        normalized_svd_quant_config = _normalize_svd_quant_config(svd_quant_config)
+        print("Use pseudo quantization for SVD factors:", normalized_svd_quant_config)
 
     # 如果没有任何候选层，直接返回空列表。
     if not candidates:
@@ -385,22 +505,32 @@ def _build_low_rank_states(
         # 构造下投影矩阵 down，使得 down.shape = [rank, in_features]。
         down = sqrt_s.unsqueeze(1) * Vh_r
 
+        if normalized_svd_quant_config is not None:
+            up = _pseudo_quantize_svd_factor(
+                up, "up", normalized_svd_quant_config["up"]
+            )
+            down = _pseudo_quantize_svd_factor(
+                down, "down", normalized_svd_quant_config["down"]
+            )
+
         # 保存该层的 low-rank 状态；后续加载量化模型时会用这些张量替换原始线性层。
-        low_rank_results.append(
-            {
-                # 保存完整模块名，便于加载时精确匹配目标层。
-                "name": item["name"],
-                # 保存最终实际使用的 rank。
-                "rank": rank,
-                # 把候选打分一并保存，方便后续分析和调试。
-                "score": item["score"],
-                # 保存模块类型，便于后续分析 attention / MLP 的 low-rank 分布。
-                "module_type": item.get("module_type", "unknown"),
-                # up / down 都先转成 half 并搬到 CPU，减少保存文件体积。
-                "up": up.half().cpu(),
-                "down": down.half().cpu(),
-            }
-        )
+        low_rank_state = {
+            # 保存完整模块名，便于加载时精确匹配目标层。
+            "name": item["name"],
+            # 保存最终实际使用的 rank。
+            "rank": rank,
+            # 把候选打分一并保存，方便后续分析和调试。
+            "score": item["score"],
+            # 保存模块类型，便于后续分析 attention / MLP 的 low-rank 分布。
+            "module_type": item.get("module_type", "unknown"),
+            # up / down 都先转成 half 并搬到 CPU，减少保存文件体积。
+            "up": up.half().cpu(),
+            "down": down.half().cpu(),
+        }
+        if normalized_svd_quant_config is not None:
+            low_rank_state["svd_quant"] = True
+            low_rank_state["svd_quant_config"] = normalized_svd_quant_config
+        low_rank_results.append(low_rank_state)
 
     print("Low-rank states built.")
     # 返回所有选中层的 low-rank 状态。
@@ -655,6 +785,8 @@ def run_mbq(
     low_rank_rank=16,
     low_rank_attn_topk_ratio=0.4,
     low_rank_mlp_topk_ratio=0.4,
+    svd_quant=False,
+    svd_quant_config=None,
     linear_mixed_probe=False,
     linear_probe_high_bit=4,
     linear_probe_keep_ratio=0.5,
@@ -990,11 +1122,13 @@ def run_mbq(
         print("Building low-rank states...")
         mbq_results["low_rank"] = _build_low_rank_states(
             model.model,
-            low_rank_candidates,
-            w_bit,
-            q_config,
+            candidates=low_rank_candidates,
+            w_bit=w_bit,
+            q_config=q_config,
             attn_topk_ratio=low_rank_attn_topk_ratio,
             mlp_topk_ratio=low_rank_mlp_topk_ratio,
+            svd_quant=svd_quant,
+            svd_quant_config=svd_quant_config,
         )
 
     if linear_mixed_probe and linear_score_entries:

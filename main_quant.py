@@ -15,6 +15,7 @@ import os
 import sys
 import traceback
 import warnings
+import ast
 from functools import partial
 
 import numpy as np
@@ -30,6 +31,27 @@ from qmllm.quantization.quant_wrapper import qwrapper
 from qmllm.models import get_process_model
 from qmllm.calibration.pileval import get_calib_dataset
 from qmllm.calibration.coco_vl import get_multimodal_calib_dataset
+
+
+def _dict_arg(value: Union[str, dict, None]) -> dict:
+    if value is None or value == "":
+        return {}
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        raise argparse.ArgumentTypeError("Expected a dict or a JSON/YAML-like string.")
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        try:
+            parsed = ast.literal_eval(value)
+        except (ValueError, SyntaxError) as exc:
+            raise argparse.ArgumentTypeError(
+                "Could not parse dict argument: {}".format(value)
+            ) from exc
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("Expected a dict value.")
+    return parsed
 
 
 def parse_quant_args() -> argparse.Namespace:
@@ -90,6 +112,8 @@ def parse_quant_args() -> argparse.Namespace:
     parser.add_argument("--low_rank_rank", default=16, type=int)
     parser.add_argument("--low_rank_attn_topk_ratio", default=0.4, type=float)
     parser.add_argument("--low_rank_mlp_topk_ratio", default=0.4, type=float)
+    parser.add_argument("--svd_quant", action="store_true")
+    parser.add_argument("--svd_quant_config", default={}, type=_dict_arg)
     parser.add_argument("--linear_mixed_probe", action="store_true")
     parser.add_argument("--linear_probe_high_bit", default=4, type=int)
     parser.add_argument("--linear_probe_keep_ratio", default=0.5, type=float)

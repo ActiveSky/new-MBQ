@@ -230,6 +230,71 @@ def _build_linear_bit_map(
     return linear_bit_map
 
 
+def _normalize_linear_mixed_config(
+    linear_mixed_config,
+    high_bit=4,
+    keep_ratio=0.5,
+    exclusive_with_low_rank=True,
+):
+    if linear_mixed_config is None:
+        linear_mixed_config = {}
+    if not isinstance(linear_mixed_config, dict):
+        raise TypeError("linear_mixed_config must be a dict.")
+
+    normalized = {
+        "high_bit": high_bit,
+        "keep_ratio": keep_ratio,
+        "exclusive_with_low_rank": exclusive_with_low_rank,
+    }
+    normalized.update(linear_mixed_config)
+    normalized["high_bit"] = int(normalized["high_bit"])
+    normalized["keep_ratio"] = float(normalized["keep_ratio"])
+    normalized["exclusive_with_low_rank"] = bool(
+        normalized.get("exclusive_with_low_rank", True)
+    )
+    return normalized
+
+
+def _normalize_low_rank_config(low_rank_config):
+    if low_rank_config is None:
+        low_rank_config = {}
+    if not isinstance(low_rank_config, dict):
+        raise TypeError("low_rank_config must be a dict.")
+
+    normalized = {
+        "rank": 16,
+        "attn_topk_ratio": 0.4,
+        "mlp_topk_ratio": 0.4,
+    }
+    normalized.update(low_rank_config)
+    normalized["rank"] = int(normalized["rank"])
+    normalized["attn_topk_ratio"] = float(normalized["attn_topk_ratio"])
+    normalized["mlp_topk_ratio"] = float(normalized["mlp_topk_ratio"])
+    return normalized
+
+
+def _build_linear_mixed_plan(
+    linear_score_entries,
+    default_w_bit,
+    linear_mixed_config=None,
+):
+    normalized_config = _normalize_linear_mixed_config(
+        linear_mixed_config,
+    )
+    linear_bit_map = _build_linear_bit_map(
+        linear_score_entries,
+        default_w_bit=default_w_bit,
+        high_w_bit=normalized_config["high_bit"],
+        keep_ratio=normalized_config["keep_ratio"],
+    )
+    selected_names = {
+        name
+        for name, bit in linear_bit_map.items()
+        if int(bit) > int(default_w_bit)
+    }
+    return normalized_config, linear_bit_map, selected_names
+
+
 def _normalize_svd_quant_config(svd_quant_config):
     if svd_quant_config is None:
         svd_quant_config = {}
@@ -782,14 +847,11 @@ def run_mbq(
     reweight_cache_path: Optional[str] = None,
     distort=False,
     use_low_rank=False,
-    low_rank_rank=16,
-    low_rank_attn_topk_ratio=0.4,
-    low_rank_mlp_topk_ratio=0.4,
+    low_rank_config=None,
     svd_quant=False,
     svd_quant_config=None,
     linear_mixed_probe=False,
-    linear_probe_high_bit=4,
-    linear_probe_keep_ratio=0.5,
+    linear_mixed_config=None,
 ):
     if "bigcode" in str(model.model.__class__).lower():
         # otherwise attention_mask will always be on cpu.
@@ -842,9 +904,12 @@ def run_mbq(
     mbq_results = {
         "scale": [],
         "low_rank": [],
+        "low_rank_config": {},
         "linear_score_map": {},
         "linear_bit_map": {},
+        "linear_mixed_config": {},
     }
+    normalized_low_rank_config = _normalize_low_rank_config(low_rank_config)
     low_rank_candidates = []
     linear_score_entries = []
 
@@ -1038,7 +1103,7 @@ def run_mbq(
             # apply_scale(layer, scales_list, input_feat_dict=input_feat)
             apply_scale(layers[i], scales_list, input_feat_dict=input_feat)
 
-            if (use_low_rank or linear_mixed_probe) and (not wa_quant):
+            if (use_low_rank or linear_mixed_probe) :
                 layer_name = get_op_name(model.model, layer)
                 layer_linear_scores = _collect_internvl2_linear_scores(
                     layer=layer,
@@ -1054,7 +1119,7 @@ def run_mbq(
                 if use_low_rank:
                     low_rank_candidates.extend(
                         [
-                            {**item, "rank": int(low_rank_rank)}
+                            {**item, "rank": normalized_low_rank_config["rank"]}
                             for item in layer_linear_scores
                         ]
                     )
@@ -1118,20 +1183,18 @@ def run_mbq(
         gc.collect()
         torch.cuda.empty_cache()
 
-    if use_low_rank and (not wa_quant):
-        print("Building low-rank states...")
-        mbq_results["low_rank"] = _build_low_rank_states(
-            model.model,
-            candidates=low_rank_candidates,
-            w_bit=w_bit,
-            q_config=q_config,
-            attn_topk_ratio=low_rank_attn_topk_ratio,
-            mlp_topk_ratio=low_rank_mlp_topk_ratio,
-            svd_quant=svd_quant,
-            svd_quant_config=svd_quant_config,
-        )
-
+    linear_mixed_selected_names = set()
     if linear_mixed_probe and linear_score_entries:
+        (
+            normalized_linear_mixed_config,
+            linear_bit_map,
+            linear_mixed_selected_names,
+        ) = _build_linear_mixed_plan(
+            linear_score_entries,
+            default_w_bit=w_bit,
+            linear_mixed_config=linear_mixed_config,
+        )
+        mbq_results["linear_mixed_config"] = normalized_linear_mixed_config
         mbq_results["linear_score_map"] = {
             item["name"]: {
                 "score": item["score"],
@@ -1141,11 +1204,26 @@ def run_mbq(
             }
             for item in linear_score_entries
         }
-        mbq_results["linear_bit_map"] = _build_linear_bit_map(
-            linear_score_entries,
-            default_w_bit=w_bit,
-            high_w_bit=linear_probe_high_bit,
-            keep_ratio=linear_probe_keep_ratio,
+        mbq_results["linear_bit_map"] = linear_bit_map
+
+    if use_low_rank :
+        mbq_results["low_rank_config"] = normalized_low_rank_config
+        if linear_mixed_selected_names:
+            low_rank_candidates = [
+                item
+                for item in low_rank_candidates
+                if item["name"] not in linear_mixed_selected_names
+            ]
+        print("Building low-rank states...")
+        mbq_results["low_rank"] = _build_low_rank_states(
+            model.model,
+            candidates=low_rank_candidates,
+            w_bit=w_bit,
+            q_config=q_config,
+            attn_topk_ratio=normalized_low_rank_config["attn_topk_ratio"],
+            mlp_topk_ratio=normalized_low_rank_config["mlp_topk_ratio"],
+            svd_quant=svd_quant,
+            svd_quant_config=svd_quant_config,
         )
 
     return mbq_results

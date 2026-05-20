@@ -51,6 +51,7 @@ fi
         --pseudo_quant \
         --output_path "$RESULT_JSON" \
         --low_rank \
+        --mixed_probe \
         --verbose
     exit_code=$?
     echo "========================================="

@@ -47,14 +47,11 @@ def qwrapper(model, prompt_inputs, prompt_kwargs, args):
             distort=args.distort,
             loss_mode=args.loss_mode,
             use_low_rank=args.low_rank,
-            low_rank_rank=args.low_rank_rank,
-            low_rank_attn_topk_ratio=args.low_rank_attn_topk_ratio,
-            low_rank_mlp_topk_ratio=args.low_rank_mlp_topk_ratio,
+            low_rank_config=getattr(args, "low_rank_config", None),
             svd_quant=getattr(args, "svd_quant", False),
             svd_quant_config=getattr(args, "svd_quant_config", None),
             linear_mixed_probe=getattr(args, "linear_mixed_probe", False),
-            linear_probe_high_bit=getattr(args, "linear_probe_high_bit", 4),
-            linear_probe_keep_ratio=getattr(args, "linear_probe_keep_ratio", 0.5),
+            linear_mixed_config=getattr(args, "linear_mixed_config", None),
         )
     elif args.method == "rtn":
         wa_quant = args.w_bit < 16 and args.a_bit < 16

@@ -24,15 +24,12 @@ def mbq_entry(
     distort: bool = False,
     loss_mode: str = "mae",
     use_low_rank: bool = False,
-    low_rank_rank: int = 16,
-    low_rank_attn_topk_ratio: float = 0.4,
-    low_rank_mlp_topk_ratio: float = 0.4,
+    low_rank_config: dict = None,
     svd_quant: bool = False,
     svd_quant_config: dict = None,
     reweight_cache_path: str = None,
     linear_mixed_probe: bool = False,
-    linear_probe_high_bit: int = 4,
-    linear_probe_keep_ratio: float = 0.5,
+    linear_mixed_config: dict = None,
 ):
     """
     model: here the model is the LLM, you have to extract the LLM first!
@@ -65,14 +62,11 @@ def mbq_entry(
             reweight_cache_path=reweight_cache_path,
             distort=distort,
             use_low_rank=use_low_rank,
-            low_rank_rank=low_rank_rank,
-            low_rank_attn_topk_ratio=low_rank_attn_topk_ratio,
-            low_rank_mlp_topk_ratio=low_rank_mlp_topk_ratio,
+            low_rank_config=low_rank_config,
             svd_quant=svd_quant,
             svd_quant_config=svd_quant_config,
             linear_mixed_probe=linear_mixed_probe,
-            linear_probe_high_bit=linear_probe_high_bit,
-            linear_probe_keep_ratio=linear_probe_keep_ratio,
+            linear_mixed_config=linear_mixed_config,
         )
 
         dirpath = os.path.dirname(scale_path)

@@ -21,23 +21,27 @@ reweight: True # if True, use avg gradient to reweight the loss of each modality
 reweight_cache_path: "scale_cache/mbq/reweight/internvl2_8b_reweight.pt" # the path to cache the avg gradient for reweighting
 loss_mode: mae
 low_rank: True # if True, use low rank decomposition to optimize the scale search process
-low_rank_rank: 256 # the rank for low rank decomposition
-low_rank_attn_topk_ratio: 0.9
-low_rank_mlp_topk_ratio: 0.9
+low_rank_config:
+  rank: 128 # the rank for low rank decomposition
+  attn_topk_ratio: 0.2
+  mlp_topk_ratio: 0.2
 svd_quant: True # if True, pseudo-quantize low-rank SVD factors after decomposition
 svd_quant_config:
   up:
     weight_quant: per_channel
-    quant_bit: 8
+    quant_bit: 4
     quant_axis: out_channel
     zero_point: False
   down:
     weight_quant: per_channel
-    quant_bit: 8
+    quant_bit: 4
     quant_axis: in_channel
     zero_point: False
 
+linear_mixed_probe: True
+linear_mixed_config:
+  high_bit: 3
+  keep_ratio: 0.1
+
 # output args
-scale_path: scale_cache/mbq/internvl2_8b_w2g64_svd_r_256_svdq8.pt
-
-
+scale_path: scale_cache/mbq/internvl2_8b_w2g64_svd_r_128_svdq4.pt

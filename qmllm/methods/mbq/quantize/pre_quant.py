@@ -862,6 +862,7 @@ def run_mbq(
     svd_quant_config=None,
     linear_mixed_probe=False,
     linear_mixed_config=None,
+    scale_search_config=None,
 ):
     if "bigcode" in str(model.model.__class__).lower():
         # otherwise attention_mask will always be on cpu.
@@ -918,6 +919,7 @@ def run_mbq(
         "linear_score_map": {},
         "linear_bit_map": {},
         "linear_mixed_config": {},
+        "scale_search_config": scale_search_config or {},
     }
     normalized_low_rank_config = _normalize_low_rank_config(low_rank_config)
     low_rank_candidates = []
@@ -1083,6 +1085,7 @@ def run_mbq(
                         vis_mask=vis_mask,
                         reweight_ratio_dict=scale_reweight_ratio_dict,
                         loss_mode=loss_mode,
+                        scale_search_config=scale_search_config,
                     )
             else:
                 if distort:

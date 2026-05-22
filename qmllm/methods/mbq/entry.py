@@ -30,6 +30,7 @@ def mbq_entry(
     reweight_cache_path: str = None,
     linear_mixed_probe: bool = False,
     linear_mixed_config: dict = None,
+    scale_search_config: dict = None,
 ):
     """
     model: here the model is the LLM, you have to extract the LLM first!
@@ -67,6 +68,7 @@ def mbq_entry(
             svd_quant_config=svd_quant_config,
             linear_mixed_probe=linear_mixed_probe,
             linear_mixed_config=linear_mixed_config,
+            scale_search_config=scale_search_config,
         )
 
         dirpath = os.path.dirname(scale_path)

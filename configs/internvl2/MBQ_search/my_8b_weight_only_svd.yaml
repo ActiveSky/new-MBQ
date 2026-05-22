@@ -20,6 +20,8 @@ distort: False # if True, use distort feature map during scale search process
 reweight: True # if True, use avg gradient to reweight the loss of each modality
 reweight_cache_path: "scale_cache/mbq/reweight/internvl2_8b_reweight.pt" # the path to cache the avg gradient for reweighting
 loss_mode: mae
+scale_search_config:
+  act_stat: modality_mean # global | token_weighted | modality_mean
 low_rank: True # if True, use low rank decomposition to optimize the scale search process
 low_rank_config:
   rank: 128 # the rank for low rank decomposition

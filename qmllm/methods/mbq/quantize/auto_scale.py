@@ -68,6 +68,72 @@ def get_act_scale(x):
     return x.abs().view(-1, x.shape[-1]).mean(0)
 
 
+def _normalize_scale_search_config(scale_search_config):
+    if scale_search_config is None:
+        scale_search_config = {}
+    if not isinstance(scale_search_config, dict):
+        raise TypeError("scale_search_config must be a dict.")
+
+    normalized = {
+        "act_stat": "global",
+        "eps": 1e-6,
+    }
+    normalized.update(scale_search_config)
+    normalized["act_stat"] = str(normalized["act_stat"]).lower()
+    normalized["eps"] = float(normalized["eps"])
+
+    valid_act_stats = {"global", "token_weighted", "modality_mean"}
+    if normalized["act_stat"] not in valid_act_stats:
+        raise ValueError(
+            "Invalid scale_search_config.act_stat '{}'. Use one of {}.".format(
+                normalized["act_stat"], sorted(valid_act_stats)
+            )
+        )
+    return normalized
+
+
+@torch.no_grad()
+def get_modality_aware_act_scale(
+    x,
+    ans_mask=None,
+    vis_mask=None,
+    reweight_ratio=None,
+    act_stat="global",
+    eps=1e-6,
+):
+    if act_stat == "global":
+        return get_act_scale(x)
+
+    if ans_mask is None or vis_mask is None or reweight_ratio is None:
+        return get_act_scale(x)
+
+    flat_x = x.abs().reshape(-1, x.shape[-1])
+    ans_mask = ans_mask.reshape(-1).to(device=flat_x.device, dtype=torch.bool)
+    vis_mask = vis_mask.reshape(-1).to(device=flat_x.device, dtype=torch.bool)
+
+    if ans_mask.numel() != flat_x.shape[0] or vis_mask.numel() != flat_x.shape[0]:
+        return get_act_scale(x)
+
+    ans_x = flat_x[ans_mask]
+    vis_x = flat_x[vis_mask]
+    if ans_x.numel() == 0 or vis_x.numel() == 0:
+        return get_act_scale(x)
+
+    ratio = float(reweight_ratio)
+    if act_stat == "token_weighted":
+        ans_count = ans_mask.sum().float().clamp(min=1.0)
+        vis_count = vis_mask.sum().float().clamp(min=1.0)
+        stat = (ans_x.sum(0) + ratio * vis_x.sum(0)) / (
+            ans_count + ratio * vis_count
+        )
+    elif act_stat == "modality_mean":
+        stat = ans_x.mean(0) + ratio * vis_x.mean(0)
+    else:
+        raise ValueError("Unsupported act_stat '{}'.".format(act_stat))
+
+    return stat.clamp(min=eps)
+
+
 @torch.no_grad()
 def scale_ln_fcs(ln, fcs, scales):
     """
@@ -194,6 +260,7 @@ def auto_scale_block(
     vis_mask,
     reweight_ratio_dict,
     loss_mode="mae",
+    scale_search_config=None,
 ):
     """
     MBQ 核心：对单个 transformer layer 自动搜索最优的逐通道 scale 因子。
@@ -216,6 +283,8 @@ def auto_scale_block(
     返回:
         scales_list: list of (prev_op_name, (fc_names,), scale_tensor)
     """
+
+    scale_search_config = _normalize_scale_search_config(scale_search_config)
 
     # ---- 构建权重量化函数 ----
     # 如果指定了 w_bit，用伪量化函数模拟 int 精度损失；
@@ -279,7 +348,14 @@ def auto_scale_block(
         # 基于激活值计算 x_max，用于构造候选 scale
         # get_act_scale: x.abs().view(-1, hidden).mean(0) → [hidden]
         #   即每个 channel 的平均绝对值，反映该 channel 的激活"活跃度"
-        x_max = get_act_scale(x)
+        x_max = get_modality_aware_act_scale(
+            x,
+            ans_mask=ans_mask,
+            vis_mask=vis_mask,
+            reweight_ratio=reweight_ratio,
+            act_stat=scale_search_config["act_stat"],
+            eps=scale_search_config["eps"],
+        )
 
         best_error = float("inf")  # 当前最优误差
         best_ratio = -1  # 最优 ratio

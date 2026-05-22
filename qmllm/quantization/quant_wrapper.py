@@ -52,6 +52,7 @@ def qwrapper(model, prompt_inputs, prompt_kwargs, args):
             svd_quant_config=getattr(args, "svd_quant_config", None),
             linear_mixed_probe=getattr(args, "linear_mixed_probe", False),
             linear_mixed_config=getattr(args, "linear_mixed_config", None),
+            scale_search_config=getattr(args, "scale_search_config", None),
         )
     elif args.method == "rtn":
         wa_quant = args.w_bit < 16 and args.a_bit < 16

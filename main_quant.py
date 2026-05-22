@@ -114,6 +114,7 @@ def parse_quant_args() -> argparse.Namespace:
     parser.add_argument("--svd_quant_config", default={}, type=_dict_arg)
     parser.add_argument("--linear_mixed_probe", action="store_true")
     parser.add_argument("--linear_mixed_config", default={}, type=_dict_arg)
+    parser.add_argument("--scale_search_config", default={}, type=_dict_arg)
 
     parser.add_argument("--scale_path", default=None, type=str)
     parser.add_argument("--run_process", action="store_true")

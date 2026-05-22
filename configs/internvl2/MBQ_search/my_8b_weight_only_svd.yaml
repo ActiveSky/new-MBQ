@@ -4,7 +4,7 @@ model_args: pretrained=OpenGVLab/InternVL2-8B
 
 # calibration data args
 calib_data: coco
-n_samples: 128
+n_samples: 256
 data_path: "my-datasets/coco/data.json"
 image_folder: "my-datasets"
 few_shot_format: False # if True, concat two samples to simulate few shot

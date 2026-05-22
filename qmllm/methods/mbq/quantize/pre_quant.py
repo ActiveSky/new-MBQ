@@ -205,54 +205,7 @@ def _collect_internvl2_linear_scores(
     return candidates
 
 
-def _build_linear_bit_map(
-    linear_score_entries,
-    default_w_bit,
-    high_w_bit,
-    keep_ratio,
-):
-    keep_ratio = max(0.0, min(1.0, float(keep_ratio)))
-    sorted_entries = sorted(
-        linear_score_entries, key=lambda item: item["score"], reverse=True
-    )
-    keep_count = min(
-        len(sorted_entries),
-        max(0, int(np.ceil(len(sorted_entries) * keep_ratio))),
-    )
-    high_precision_names = {item["name"] for item in sorted_entries[:keep_count]}
-    linear_bit_map = {}
-    for item in sorted_entries:
-        linear_bit_map[item["name"]] = (
-            int(high_w_bit)
-            if item["name"] in high_precision_names
-            else int(default_w_bit)
-        )
-    return linear_bit_map
 
-
-def _normalize_linear_mixed_config(
-    linear_mixed_config,
-    high_bit=4,
-    keep_ratio=0.5,
-    exclusive_with_low_rank=True,
-):
-    if linear_mixed_config is None:
-        linear_mixed_config = {}
-    if not isinstance(linear_mixed_config, dict):
-        raise TypeError("linear_mixed_config must be a dict.")
-
-    normalized = {
-        "high_bit": high_bit,
-        "keep_ratio": keep_ratio,
-        "exclusive_with_low_rank": exclusive_with_low_rank,
-    }
-    normalized.update(linear_mixed_config)
-    normalized["high_bit"] = int(normalized["high_bit"])
-    normalized["keep_ratio"] = float(normalized["keep_ratio"])
-    normalized["exclusive_with_low_rank"] = bool(
-        normalized.get("exclusive_with_low_rank", True)
-    )
-    return normalized
 
 
 def _normalize_low_rank_config(low_rank_config):
@@ -278,6 +231,58 @@ def _build_linear_mixed_plan(
     default_w_bit,
     linear_mixed_config=None,
 ):
+    
+    def _normalize_linear_mixed_config(
+        linear_mixed_config,
+        high_bit=4,
+        keep_ratio=0.5,
+        exclusive_with_low_rank=True,
+    ):
+        if linear_mixed_config is None:
+            linear_mixed_config = {}
+        if not isinstance(linear_mixed_config, dict):
+            raise TypeError("linear_mixed_config must be a dict.")
+
+        normalized = {
+            "high_bit": high_bit,
+            "keep_ratio": keep_ratio,
+            "exclusive_with_low_rank": exclusive_with_low_rank,
+        }
+        normalized.update(linear_mixed_config)
+        normalized["high_bit"] = int(normalized["high_bit"])
+        normalized["keep_ratio"] = float(normalized["keep_ratio"])
+        normalized["exclusive_with_low_rank"] = bool(
+            normalized.get("exclusive_with_low_rank", True)
+        )
+        return normalized
+    
+    
+    def _build_linear_bit_map(
+        linear_score_entries,
+        default_w_bit,
+        high_w_bit,
+        keep_ratio,
+    ):
+        keep_ratio = max(0.0, min(1.0, float(keep_ratio)))
+        sorted_entries = sorted(
+            linear_score_entries, key=lambda item: item["score"], reverse=True
+        )
+        keep_count = min(
+            len(sorted_entries),
+            max(0, int(np.ceil(len(sorted_entries) * keep_ratio))),
+        )
+        high_precision_names = {item["name"] for item in sorted_entries[:keep_count]}
+        linear_bit_map = {}
+        for item in sorted_entries:
+            linear_bit_map[item["name"]] = (
+                int(high_w_bit)
+                if item["name"] in high_precision_names
+                else int(default_w_bit)
+            )
+        return linear_bit_map
+
+    
+    
     normalized_config = _normalize_linear_mixed_config(
         linear_mixed_config,
     )
@@ -295,117 +300,6 @@ def _build_linear_mixed_plan(
     return normalized_config, linear_bit_map, selected_names
 
 
-def _normalize_svd_quant_config(svd_quant_config):
-    if svd_quant_config is None:
-        svd_quant_config = {}
-    if not isinstance(svd_quant_config, dict):
-        raise TypeError("svd_quant_config must be a dict when svd_quant is enabled.")
-
-    default_factor_config = {
-        "weight_quant": "per_channel",
-        "quant_bit": 8,
-        "zero_point": False,
-        "q_group_size": -1,
-    }
-    shared_config = {
-        key: value
-        for key, value in svd_quant_config.items()
-        if key not in {"up", "down"}
-    }
-    default_axis = {"up": "out_channel", "down": "in_channel"}
-    normalized = {}
-
-    for factor_name in ("up", "down"):
-        factor_config = dict(default_factor_config)
-        factor_config.update(shared_config)
-        user_config = svd_quant_config.get(factor_name, {})
-        if not isinstance(user_config, dict):
-            raise TypeError(
-                "svd_quant_config['{}'] must be a dict.".format(factor_name)
-            )
-        factor_config.update(user_config)
-        factor_config.setdefault("quant_axis", default_axis[factor_name])
-        factor_config["weight_quant"] = str(factor_config["weight_quant"]).lower()
-        factor_config["quant_axis"] = str(factor_config["quant_axis"]).lower()
-        factor_config["quant_bit"] = int(factor_config["quant_bit"])
-        factor_config["q_group_size"] = int(factor_config.get("q_group_size", -1))
-        factor_config["zero_point"] = bool(factor_config.get("zero_point", False))
-        normalized[factor_name] = factor_config
-
-    return normalized
-
-
-@torch.no_grad()
-def _pseudo_quantize_svd_factor(tensor, factor_name, factor_config):
-    weight_quant = factor_config["weight_quant"]
-    quant_bit = factor_config["quant_bit"]
-    quant_axis = factor_config["quant_axis"]
-    zero_point = factor_config["zero_point"]
-    q_group_size = factor_config["q_group_size"]
-
-    if quant_bit >= 16:
-        return tensor
-
-    if weight_quant not in {"per_channel", "per_group", "per_tensor"}:
-        raise ValueError(
-            "Invalid SVD {} weight_quant '{}'. Use per_channel, per_group, "
-            "or per_tensor.".format(factor_name, weight_quant)
-        )
-
-    transpose = False
-    if factor_name == "up":
-        if quant_axis in {"out_channel", "row"}:
-            transpose = False
-        elif quant_axis in {"rank_channel", "col"}:
-            transpose = True
-        else:
-            raise ValueError(
-                "Invalid SVD up quant_axis '{}'. Use out_channel or "
-                "rank_channel.".format(quant_axis)
-            )
-    elif factor_name == "down":
-        if quant_axis in {"rank_channel", "row"}:
-            transpose = False
-        elif quant_axis in {"in_channel", "col"}:
-            transpose = True
-        else:
-            raise ValueError(
-                "Invalid SVD down quant_axis '{}'. Use in_channel or "
-                "rank_channel.".format(quant_axis)
-            )
-    else:
-        raise ValueError("Unknown SVD factor '{}'.".format(factor_name))
-
-    quant_input = tensor.transpose(0, 1).contiguous() if transpose else tensor
-
-    if weight_quant == "per_tensor":
-        quantized = pseudo_quantize_tensor(
-            quant_input,
-            n_bits=quant_bit,
-            zero_point=zero_point,
-            q_group_size=-1,
-            per_tensor=True,
-            inplace=False,
-        )
-    else:
-        group_size = q_group_size if weight_quant == "per_group" else -1
-        if group_size > 0 and quant_input.shape[-1] % group_size != 0:
-            raise ValueError(
-                "SVD {} per_group quantization requires the last dimension "
-                "({}) to be divisible by q_group_size ({}).".format(
-                    factor_name, quant_input.shape[-1], group_size
-                )
-            )
-        quantized = pseudo_quantize_tensor(
-            quant_input,
-            n_bits=quant_bit,
-            zero_point=zero_point,
-            q_group_size=group_size,
-            per_tensor=False,
-            inplace=False,
-        )
-
-    return quantized.transpose(0, 1).contiguous() if transpose else quantized
 
 
 @torch.no_grad()
@@ -469,6 +363,122 @@ def _build_low_rank_states(
         selected.extend(_take_topk(attn_candidates, attn_ratio))
         selected.extend(_take_topk(mlp_candidates, mlp_ratio))
         return sorted(selected, key=lambda item: item["score"], reverse=True)
+
+
+    
+    def _normalize_svd_quant_config(svd_quant_config):
+        if svd_quant_config is None:
+            svd_quant_config = {}
+        if not isinstance(svd_quant_config, dict):
+            raise TypeError("svd_quant_config must be a dict when svd_quant is enabled.")
+
+        default_factor_config = {
+            "weight_quant": "per_channel",
+            "quant_bit": 8,
+            "zero_point": False,
+            "q_group_size": -1,
+        }
+        shared_config = {
+            key: value
+            for key, value in svd_quant_config.items()
+            if key not in {"up", "down"}
+        }
+        default_axis = {"up": "out_channel", "down": "in_channel"}
+        normalized = {}
+
+        for factor_name in ("up", "down"):
+            factor_config = dict(default_factor_config)
+            factor_config.update(shared_config)
+            user_config = svd_quant_config.get(factor_name, {})
+            if not isinstance(user_config, dict):
+                raise TypeError(
+                    "svd_quant_config['{}'] must be a dict.".format(factor_name)
+                )
+            factor_config.update(user_config)
+            factor_config.setdefault("quant_axis", default_axis[factor_name])
+            factor_config["weight_quant"] = str(factor_config["weight_quant"]).lower()
+            factor_config["quant_axis"] = str(factor_config["quant_axis"]).lower()
+            factor_config["quant_bit"] = int(factor_config["quant_bit"])
+            factor_config["q_group_size"] = int(factor_config.get("q_group_size", -1))
+            factor_config["zero_point"] = bool(factor_config.get("zero_point", False))
+            normalized[factor_name] = factor_config
+
+        return normalized
+
+
+
+    @torch.no_grad()
+    def _pseudo_quantize_svd_factor(tensor, factor_name, factor_config):
+        weight_quant = factor_config["weight_quant"]
+        quant_bit = factor_config["quant_bit"]
+        quant_axis = factor_config["quant_axis"]
+        zero_point = factor_config["zero_point"]
+        q_group_size = factor_config["q_group_size"]
+
+        if quant_bit >= 16:
+            return tensor
+
+        if weight_quant not in {"per_channel", "per_group", "per_tensor"}:
+            raise ValueError(
+                "Invalid SVD {} weight_quant '{}'. Use per_channel, per_group, "
+                "or per_tensor.".format(factor_name, weight_quant)
+            )
+
+        transpose = False
+        if factor_name == "up":
+            if quant_axis in {"out_channel", "row"}:
+                transpose = False
+            elif quant_axis in {"rank_channel", "col"}:
+                transpose = True
+            else:
+                raise ValueError(
+                    "Invalid SVD up quant_axis '{}'. Use out_channel or "
+                    "rank_channel.".format(quant_axis)
+                )
+        elif factor_name == "down":
+            if quant_axis in {"rank_channel", "row"}:
+                transpose = False
+            elif quant_axis in {"in_channel", "col"}:
+                transpose = True
+            else:
+                raise ValueError(
+                    "Invalid SVD down quant_axis '{}'. Use in_channel or "
+                    "rank_channel.".format(quant_axis)
+                )
+        else:
+            raise ValueError("Unknown SVD factor '{}'.".format(factor_name))
+
+        quant_input = tensor.transpose(0, 1).contiguous() if transpose else tensor
+
+        if weight_quant == "per_tensor":
+            quantized = pseudo_quantize_tensor(
+                quant_input,
+                n_bits=quant_bit,
+                zero_point=zero_point,
+                q_group_size=-1,
+                per_tensor=True,
+                inplace=False,
+            )
+        else:
+            group_size = q_group_size if weight_quant == "per_group" else -1
+            if group_size > 0 and quant_input.shape[-1] % group_size != 0:
+                raise ValueError(
+                    "SVD {} per_group quantization requires the last dimension "
+                    "({}) to be divisible by q_group_size ({}).".format(
+                        factor_name, quant_input.shape[-1], group_size
+                    )
+                )
+            quantized = pseudo_quantize_tensor(
+                quant_input,
+                n_bits=quant_bit,
+                zero_point=zero_point,
+                q_group_size=group_size,
+                per_tensor=False,
+                inplace=False,
+            )
+
+        return quantized.transpose(0, 1).contiguous() if transpose else quantized
+
 
     normalized_svd_quant_config = None
     if svd_quant:
@@ -1009,8 +1019,11 @@ def run_mbq(
         inps = layer(inps, **layer_kwargs)[0]
         for h in handles:
             h.remove()
+
         # now solve for scaling
+        print(f"[Layer {i}] input_feat shapes before cat: { {k: [t.shape for t in v] for k, v in input_feat.items()} }")
         input_feat = {k: torch.cat(v, dim=0) for k, v in input_feat.items()}
+        print(f"[Layer {i}] input_feat shapes after cat: { {k: v.shape for k, v in input_feat.items()} }")
 
         # Clear GPU memory
         torch.cuda.empty_cache()

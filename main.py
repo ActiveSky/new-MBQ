@@ -335,6 +335,8 @@ def parse_eval_args() -> argparse.Namespace:
     parser.add_argument("--low_rank_config", default={}, type=_dict_arg)
     parser.add_argument("--svd_quant", action="store_true")
     parser.add_argument("--svd_quant_config", default={}, type=_dict_arg)
+    parser.add_argument("--double_quant", action="store_true")
+    parser.add_argument("--double_quant_config", default={}, type=_dict_arg)
     parser.add_argument("--scale_path", default=None, type=str)
     parser.add_argument("--linear_mixed_config", default={}, type=_dict_arg)
     parser.add_argument("--scale_search_config", default={}, type=_dict_arg)

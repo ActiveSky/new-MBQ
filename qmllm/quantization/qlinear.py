@@ -148,7 +148,12 @@ class WOQLowRankLinear(nn.Module):
 
     @staticmethod
     def from_float(
-        module, low_rank_state, weight_quant="per_group", w_bit=4, weight_group=128
+        module,
+        low_rank_state,
+        weight_quant="per_group",
+        w_bit=4,
+        weight_group=128,
+        q_config=None,
     ):
         assert isinstance(module, torch.nn.Linear)
         rank = int(low_rank_state["rank"])
@@ -169,8 +174,13 @@ class WOQLowRankLinear(nn.Module):
                 module.weight, n_bits=w_bit
             )
         elif weight_quant == "per_group":
+            q_config = dict(q_config or {})
+            q_config.setdefault("q_group_size", weight_group)
             new_module.weight = pseudo_quantize_tensor(
-                module.weight, n_bits=w_bit, q_group_size=weight_group, inplace=False
+                module.weight,
+                n_bits=w_bit,
+                inplace=False,
+                **q_config,
             )
         else:
             raise ValueError(f"Invalid weight_quant: {weight_quant}")

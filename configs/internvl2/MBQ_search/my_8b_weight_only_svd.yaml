@@ -4,7 +4,7 @@ model_args: pretrained=OpenGVLab/InternVL2-8B
 
 # calibration data args
 calib_data: coco
-n_samples: 256
+n_samples: 128
 data_path: "my-datasets/coco/data.json"
 image_folder: "my-datasets"
 few_shot_format: False # if True, concat two samples to simulate few shot
@@ -44,6 +44,12 @@ linear_mixed_probe: True
 linear_mixed_config:
   high_bit: 3
   keep_ratio: 0.1
+
+double_quant: True
+double_quant_config:
+  scale_bit: 8
+  scale_group: 128
+  zero_point: True 
 
 # output args
 scale_path: scale_cache/mbq/internvl2_8b_w2g64_svd_r_128_svdq4.pt

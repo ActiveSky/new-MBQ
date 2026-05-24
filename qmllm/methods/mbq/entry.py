@@ -27,6 +27,8 @@ def mbq_entry(
     low_rank_config: dict = None,
     svd_quant: bool = False,
     svd_quant_config: dict = None,
+    double_quant: bool = False,
+    double_quant_config: dict = None,
     reweight_cache_path: str = None,
     linear_mixed_probe: bool = False,
     linear_mixed_config: dict = None,
@@ -41,6 +43,8 @@ def mbq_entry(
     q_config = {
         "zero_point": zero_point,  # by default True
         "q_group_size": q_group_size,  # whether to use group quantization
+        "double_quant": double_quant,
+        "double_quant_config": double_quant_config or {},
     }
 
     assert scale_path is not None

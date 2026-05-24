@@ -50,6 +50,8 @@ def qwrapper(model, prompt_inputs, prompt_kwargs, args):
             low_rank_config=getattr(args, "low_rank_config", None),
             svd_quant=getattr(args, "svd_quant", False),
             svd_quant_config=getattr(args, "svd_quant_config", None),
+            double_quant=getattr(args, "double_quant", False),
+            double_quant_config=getattr(args, "double_quant_config", None),
             linear_mixed_probe=getattr(args, "linear_mixed_probe", False),
             linear_mixed_config=getattr(args, "linear_mixed_config", None),
             scale_search_config=getattr(args, "scale_search_config", None),

@@ -92,6 +92,7 @@ def pseudo_quantize_model_weight(
                     weight_quant="per_group",
                     w_bit=linear_w_bit,
                     weight_group=q_config.get("q_group_size", 128),
+                    q_config=q_config,
                 )
                 father_module = get_module_by_name_suffix(
                     layers[i], ".".join(n.split(".")[:-1])

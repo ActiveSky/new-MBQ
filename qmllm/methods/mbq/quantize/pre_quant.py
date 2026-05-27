@@ -799,21 +799,45 @@ def process_input(prompt_inputs, prompt_kwargs):
 
 def _compute_reweight_medians(grad_avg_dict):
     attn_list = []
+    attn_in_list = []
     mlp_list = []
+    mlp_in_list = []
+    mlp_out_list = []
 
     for key_name in grad_avg_dict:
-        if "down_" in key_name or "w2" in key_name:
-            mlp_list.append(
-                grad_avg_dict[key_name]["vis_avg_grad"]
-                / grad_avg_dict[key_name]["cap_avg_grad"]
-            )
+        ratio = (
+            grad_avg_dict[key_name]["vis_avg_grad"]
+            / grad_avg_dict[key_name]["cap_avg_grad"]
+        )
         if "o_proj" in key_name or "wo" in key_name:
-            attn_list.append(
-                grad_avg_dict[key_name]["vis_avg_grad"]
-                / grad_avg_dict[key_name]["cap_avg_grad"]
-            )
+            attn_list.append(ratio)
+        if "wqkv" in key_name or "q_proj" in key_name or "k_proj" in key_name or "v_proj" in key_name:
+            attn_in_list.append(ratio)
+        if "w1" in key_name or "gate_proj" in key_name or "up_proj" in key_name:
+            mlp_in_list.append(ratio)
+            mlp_list.append(ratio)
+        if "w2" in key_name or "down_proj" in key_name:
+            mlp_out_list.append(ratio)
+            mlp_list.append(ratio)
 
-    return float(np.median(attn_list)), float(np.median(mlp_list))
+    def _median_or_fallback(values, fallback):
+        return float(np.median(values)) if values else float(fallback)
+
+    attn_median = _median_or_fallback(attn_list, 1.0)
+    mlp_median = _median_or_fallback(mlp_list, 1.0)
+    attn_in_median = _median_or_fallback(attn_in_list, attn_median)
+    attn_out_median = _median_or_fallback(attn_list, attn_median)
+    mlp_in_median = _median_or_fallback(mlp_in_list, mlp_median)
+    mlp_out_median = _median_or_fallback(mlp_out_list, mlp_median)
+
+    return {
+        "attn": attn_median,
+        "mlp": mlp_median,
+        "attn_in": attn_in_median,
+        "attn_out": attn_out_median,
+        "mlp_in": mlp_in_median,
+        "mlp_out": mlp_out_median,
+    }
 
 
 def _load_reweight_cache(reweight_cache_path: Optional[str]):
@@ -839,6 +863,12 @@ def _save_reweight_cache(reweight_cache_path: Optional[str], reweight_cache: dic
         os.makedirs(dirpath, exist_ok=True)
 
     torch.save(reweight_cache, reweight_cache_path)
+
+
+def _use_scale_group_reweight(scale_search_config):
+    if not isinstance(scale_search_config, dict):
+        return False
+    return bool(scale_search_config.get("scale_group_reweight", False))
 
 
 @torch.no_grad()
@@ -920,10 +950,12 @@ def run_mbq(
         "linear_bit_map": {},
         "linear_mixed_config": {},
         "scale_search_config": scale_search_config or {},
+        "scale_diagnostics": [],
     }
     normalized_low_rank_config = _normalize_low_rank_config(low_rank_config)
     low_rank_candidates = []
     linear_score_entries = []
+    scale_group_reweight = _use_scale_group_reweight(scale_search_config)
 
     # ===========MBQ:下面reweight和distort都是新增
     if reweight:
@@ -931,12 +963,37 @@ def run_mbq(
 
         if reweight_cache is not None:
             grad_avg_dict = reweight_cache["grad_avg_dict"]
-            attn_median = reweight_cache.get("attn_median")
-            mlp_median = reweight_cache.get("mlp_median")
+            reweight_medians = reweight_cache.get("reweight_medians")
+            if reweight_medians is None:
+                attn_median = reweight_cache.get("attn_median")
+                mlp_median = reweight_cache.get("mlp_median")
+                if attn_median is None or mlp_median is None:
+                    reweight_medians = _compute_reweight_medians(grad_avg_dict)
+                    attn_median = reweight_medians["attn"]
+                    mlp_median = reweight_medians["mlp"]
+                    reweight_cache["attn_median"] = attn_median
+                    reweight_cache["mlp_median"] = mlp_median
+                    reweight_cache["reweight_medians"] = reweight_medians
+                else:
+                    reweight_medians = {
+                        "attn": float(attn_median),
+                        "mlp": float(mlp_median),
+                        "attn_in": float(attn_median),
+                        "attn_out": float(attn_median),
+                        "mlp_in": float(mlp_median),
+                        "mlp_out": float(mlp_median),
+                    }
+                    reweight_cache["reweight_medians"] = reweight_medians
+            else:
+                attn_median = reweight_medians.get("attn", 1.0)
+                mlp_median = reweight_medians.get("mlp", 1.0)
             if attn_median is None or mlp_median is None:
-                attn_median, mlp_median = _compute_reweight_medians(grad_avg_dict)
+                reweight_medians = _compute_reweight_medians(grad_avg_dict)
+                attn_median = reweight_medians["attn"]
+                mlp_median = reweight_medians["mlp"]
                 reweight_cache["attn_median"] = attn_median
                 reweight_cache["mlp_median"] = mlp_median
+                reweight_cache["reweight_medians"] = reweight_medians
             print("Loaded reweight cache, skipping gradient recomputation.")
         else:
             model.to_cuda()
@@ -971,11 +1028,14 @@ def run_mbq(
             grad_cache.remove_hooks()
             del grad_cache
 
-            attn_median, mlp_median = _compute_reweight_medians(grad_avg_dict)
+            reweight_medians = _compute_reweight_medians(grad_avg_dict)
+            attn_median = reweight_medians["attn"]
+            mlp_median = reweight_medians["mlp"]
             reweight_cache = {
                 "grad_avg_dict": grad_avg_dict,
                 "attn_median": float(attn_median),
                 "mlp_median": float(mlp_median),
+                "reweight_medians": {k: float(v) for k, v in reweight_medians.items()},
             }
 
             _save_reweight_cache(reweight_cache_path, reweight_cache)
@@ -1032,18 +1092,45 @@ def run_mbq(
 
         # =======新增
         if reweight:
-            scale_reweight_ratio_dict = {}
+            scale_reweight_ratio_dict = {"attn": attn_median, "mlp": mlp_median}
+            if scale_group_reweight:
+                scale_reweight_ratio_dict.update(
+                    {
+                        "attn_in": attn_median,
+                        "attn_out": attn_median,
+                        "mlp_in": mlp_median,
+                        "mlp_out": mlp_median,
+                    }
+                )
             for key, value in grad_avg_dict.items():
                 item_list = key.split(".")
                 if str(i) in item_list:
                     if "wo" in item_list or "o_proj" in item_list:
-                        scale_reweight_ratio_dict["attn"] = max(
+                        ratio = max(
                             (value["vis_avg_grad"] / value["cap_avg_grad"]), attn_median
                         )
+                        scale_reweight_ratio_dict["attn"] = ratio
+                        if scale_group_reweight:
+                            scale_reweight_ratio_dict["attn_out"] = ratio
                     elif "w2" in item_list or "down_proj" in item_list:
-                        scale_reweight_ratio_dict["mlp"] = max(
+                        ratio = max(
                             (value["vis_avg_grad"] / value["cap_avg_grad"]), mlp_median
                         )
+                        scale_reweight_ratio_dict["mlp"] = ratio
+                        if scale_group_reweight:
+                            scale_reweight_ratio_dict["mlp_out"] = ratio
+                    elif "w1" in item_list or "gate_proj" in item_list or "up_proj" in item_list:
+                        if scale_group_reweight:
+                            ratio = max(
+                                (value["vis_avg_grad"] / value["cap_avg_grad"]), mlp_median
+                            )
+                            scale_reweight_ratio_dict["mlp_in"] = ratio
+                    elif "wqkv" in item_list or "q_proj" in item_list or "k_proj" in item_list or "v_proj" in item_list:
+                        if scale_group_reweight:
+                            ratio = max(
+                                (value["vis_avg_grad"] / value["cap_avg_grad"]), attn_median
+                            )
+                            scale_reweight_ratio_dict["attn_in"] = ratio
         else:
             scale_reweight_ratio_dict = {"attn": None, "mlp": None}
         # =======新增结束
@@ -1114,6 +1201,9 @@ def run_mbq(
                         vis_mask=vis_mask,
                         reweight_ratio_dict=scale_reweight_ratio_dict,
                         loss_mode=loss_mode,
+                        scale_search_config=scale_search_config,
+                        scale_diagnostics=mbq_results["scale_diagnostics"],
+                        scale_prefix=get_op_name(model.model, layer) + ".",
                     )
 
             # apply_scale(layer, scales_list, input_feat_dict=input_feat)

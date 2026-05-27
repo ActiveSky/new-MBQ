@@ -27,7 +27,7 @@ seaborn
 # for conversation tasks
 # anthropic
 openai==0.28
-fschat
+# fschat
 
 # use flash attention
 packaging

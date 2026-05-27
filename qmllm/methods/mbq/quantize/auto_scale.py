@@ -76,20 +76,63 @@ def _normalize_scale_search_config(scale_search_config):
 
     normalized = {
         "act_stat": "global",
+        "act_stat_candidates": ["global", "token_weighted", "modality_mean"],
+        "loss_reduction": "legacy",
         "eps": 1e-6,
     }
     normalized.update(scale_search_config)
     normalized["act_stat"] = str(normalized["act_stat"]).lower()
+    normalized["loss_reduction"] = str(normalized["loss_reduction"]).lower()
     normalized["eps"] = float(normalized["eps"])
 
-    valid_act_stats = {"global", "token_weighted", "modality_mean"}
+    valid_act_stats = {"global", "token_weighted", "modality_mean", "auto"}
     if normalized["act_stat"] not in valid_act_stats:
         raise ValueError(
             "Invalid scale_search_config.act_stat '{}'. Use one of {}.".format(
                 normalized["act_stat"], sorted(valid_act_stats)
             )
         )
+
+    if normalized["act_stat"] == "auto":
+        candidates = normalized.get("act_stat_candidates")
+        if candidates is None:
+            candidates = ["global", "token_weighted", "modality_mean"]
+        if not isinstance(candidates, (list, tuple)):
+            raise TypeError("scale_search_config.act_stat_candidates must be a list.")
+        candidates = [str(item).lower() for item in candidates]
+        candidates = [item for item in candidates if item != "auto"]
+        if not candidates:
+            candidates = ["global", "token_weighted", "modality_mean"]
+        invalid = sorted(set(candidates) - (valid_act_stats - {"auto"}))
+        if invalid:
+            raise ValueError(
+                "Invalid scale_search_config.act_stat_candidates {}. Use one of {}.".format(
+                    invalid, sorted(valid_act_stats - {"auto"})
+                )
+            )
+        normalized["act_stat_candidates"] = list(dict.fromkeys(candidates))
+    else:
+        normalized["act_stat_candidates"] = [normalized["act_stat"]]
+
+    valid_loss_reductions = {"legacy", "token_weighted", "modality_mean"}
+    if normalized["loss_reduction"] not in valid_loss_reductions:
+        raise ValueError(
+            "Invalid scale_search_config.loss_reduction '{}'. Use one of {}.".format(
+                normalized["loss_reduction"], sorted(valid_loss_reductions)
+            )
+        )
     return normalized
+
+
+def _get_reweight_ratio(reweight_ratio_dict, key, fallback_keys=()):
+    if reweight_ratio_dict is None:
+        return None
+    if key in reweight_ratio_dict:
+        return reweight_ratio_dict[key]
+    for fallback_key in fallback_keys:
+        if fallback_key in reweight_ratio_dict:
+            return reweight_ratio_dict[fallback_key]
+    return None
 
 
 @torch.no_grad()
@@ -261,6 +304,8 @@ def auto_scale_block(
     reweight_ratio_dict,
     loss_mode="mae",
     scale_search_config=None,
+    scale_diagnostics=None,
+    scale_prefix="",
 ):
     """
     MBQ 核心：对单个 transformer layer 自动搜索最优的逐通道 scale 因子。
@@ -345,32 +390,106 @@ def auto_scale_block(
             if isinstance(org_out, tuple):
                 org_out = org_out[0]
 
-        # 基于激活值计算 x_max，用于构造候选 scale
-        # get_act_scale: x.abs().view(-1, hidden).mean(0) → [hidden]
-        #   即每个 channel 的平均绝对值，反映该 channel 的激活"活跃度"
-        x_max = get_modality_aware_act_scale(
-            x,
-            ans_mask=ans_mask,
-            vis_mask=vis_mask,
-            reweight_ratio=reweight_ratio,
-            act_stat=scale_search_config["act_stat"],
-            eps=scale_search_config["eps"],
-        )
-
-        best_error = float("inf")  # 当前最优误差
-        best_ratio = -1  # 最优 ratio
-        best_scales = None  # 最优 scale 张量
-
         # n_grid = 20
         n_grid = 50  # 第一阶段：全局粗搜 50 档（尤其对 2bit 量化）
         local_refine_grid = 11  # 第二阶段：在最优点附近再做局部细搜
         local_refine_half_span = 1 / n_grid
-        history = []  # 记录所有 ratio 的 loss，用于调试
 
         # 保存原始 state_dict，每次迭代结束后恢复
         org_sd = {k: v.cpu() for k, v in block.state_dict().items()}
 
-        def _evaluate_scale_ratio(ratio):
+        def _to_float(value):
+            if isinstance(value, torch.Tensor):
+                return float(value.detach().float().cpu().item())
+            return float(value)
+
+        def _compute_loss_parts(out):
+            diff = (org_out - out).float()
+            if loss_mode == "mse":
+                diff = diff.pow(2)
+            elif loss_mode == "mae":
+                diff = diff.abs()
+            else:
+                raise ValueError("Unsupported loss_mode '{}'.".format(loss_mode))
+
+            if ans_mask is not None and vis_mask is not None:
+                ans_mask_expand = (
+                    ans_mask.to(device=out.device, dtype=torch.bool)
+                    .unsqueeze(-1)
+                    .expand_as(out)
+                )
+                vis_mask_expand = (
+                    vis_mask.to(device=out.device, dtype=torch.bool)
+                    .unsqueeze(-1)
+                    .expand_as(out)
+                )
+
+                ans_count = ans_mask_expand.sum().float().clamp(min=1.0)
+                vis_count = vis_mask_expand.sum().float().clamp(min=1.0)
+                ans_sum = (diff * ans_mask_expand).sum()
+                vis_sum = (diff * vis_mask_expand).sum()
+                ans_loss = ans_sum / ans_count
+                vis_loss = vis_sum / vis_count
+
+                if reweight_ratio is not None:
+                    ratio = float(reweight_ratio)
+                    loss_reduction = scale_search_config["loss_reduction"]
+                    if loss_reduction == "legacy":
+                        if loss_mode == "mse":
+                            loss = ans_loss + ratio * vis_loss
+                        else:
+                            loss = (ans_sum + ratio * vis_sum) / (
+                                ans_count + vis_count
+                            )
+                    elif loss_reduction == "token_weighted":
+                        loss = (ans_sum + ratio * vis_sum) / (
+                            ans_count + ratio * vis_count
+                        ).clamp(min=1.0)
+                    elif loss_reduction == "modality_mean":
+                        loss = ans_loss + ratio * vis_loss
+                    else:
+                        raise ValueError(
+                            "Unsupported loss_reduction '{}'.".format(
+                                loss_reduction
+                            )
+                        )
+                else:
+                    loss = diff.mean()
+
+                return {
+                    "loss": _to_float(loss),
+                    "ans_loss": _to_float(ans_loss),
+                    "vis_loss": _to_float(vis_loss),
+                    "ans_count": _to_float(ans_count),
+                    "vis_count": _to_float(vis_count),
+                }
+
+            if ans_mask is not None and vis_mask is None:
+                ans_mask_expand = (
+                    ans_mask.to(device=out.device, dtype=torch.bool)
+                    .unsqueeze(-1)
+                    .expand_as(out)
+                )
+                ans_count = ans_mask_expand.sum().float().clamp(min=1.0)
+                ans_loss = (diff * ans_mask_expand).sum() / ans_count
+                return {
+                    "loss": _to_float(ans_loss),
+                    "ans_loss": _to_float(ans_loss),
+                    "vis_loss": None,
+                    "ans_count": _to_float(ans_count),
+                    "vis_count": None,
+                }
+
+            loss = diff.mean()
+            return {
+                "loss": _to_float(loss),
+                "ans_loss": None,
+                "vis_loss": None,
+                "ans_count": None,
+                "vis_count": None,
+            }
+
+        def _evaluate_scale_ratio(ratio, x_max):
             # ---- 构造候选 scale ----
             # scales = x_max^ratio，ratio 越大 scale 越接近激活分布
             # clamp 防止极小值导致数值不稳定
@@ -393,120 +512,111 @@ def auto_scale_block(
                 out = out[0]
 
             # ---- 计算量化误差 ----
-            # 根据 loss_mode 和是否有 mask 选择不同的损失计算方式
-            # out:   量化后的输出 [tokens, hidden]
-            # org_out: 原始输出 [tokens, hidden]
-
-            if loss_mode == "mse":
-                # ----- MSE 模式：均方误差 -----
-                if ans_mask is not None and vis_mask is not None:
-                    # 多模态 + reweight：分别计算答案区域和视觉区域的 MSE
-                    # ans_mask/vis_mask 形状 [tokens]，True 表示该 token 属于对应区域
-                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(
-                        out
-                    )  # [tokens] → [tokens, hidden]
-                    vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
-                    masked_diff_ans = (org_out - out).float().pow(2) * ans_mask_expand
-                    masked_diff_vis = (org_out - out).float().pow(2) * vis_mask_expand
-                    if reweight_ratio is not None:
-                        # L = L_ans / N_ans + r * L_vis / N_vis
-                        loss = (
-                            masked_diff_ans.sum() / ans_mask_expand.sum()
-                            + reweight_ratio
-                            * (masked_diff_vis.sum() / vis_mask_expand.sum())
-                        )
-                    else:
-                        loss = (org_out - out).float().pow(2).mean().item()
-                elif ans_mask is not None and vis_mask is None:  # 和AWQ的代码一样
-                    # AWQ 风格：只看答案 token 区域的 MSE
-                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-                    masked_diff = (org_out - out).float().pow(2) * ans_mask_expand
-                    loss = masked_diff.sum() / ans_mask_expand.sum()
-                else:
-                    # 无 mask：全局 MSE
-                    loss = (
-                        (org_out - out).float().pow(2).mean().item()
-                    )  # float prevents overflow
-            elif loss_mode == "mae":  # MBQ增加的loss计算方式
-                # ----- MAE 模式：平均绝对误差（对离群值更鲁棒） -----
-                if ans_mask is not None and vis_mask is not None:
-                    # 多模态 + reweight：分别计算答案区域和视觉区域的 MAE
-                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-                    vis_mask_expand = vis_mask.unsqueeze(-1).expand_as(out).cuda()
-                    masked_diff_ans = (org_out - out).float().abs() * ans_mask_expand
-                    masked_diff_vis = (org_out - out).float().abs() * vis_mask_expand
-                    if reweight_ratio is not None:
-                        # L = (L_ans + r * L_vis) / (N_ans + N_vis)
-                        # 注意：MAE 模式下分母是总 token 数，不同于 MSE 的分别归一化
-                        loss = (
-                            masked_diff_ans.sum()
-                            + reweight_ratio * masked_diff_vis.sum()
-                        ) / (ans_mask_expand.sum() + vis_mask_expand.sum())
-                    else:
-                        loss = (org_out - out).float().abs().mean().item()
-                elif ans_mask is not None and vis_mask is None:
-                    # AWQ 风格：只看答案 token 区域的 MAE
-                    ans_mask_expand = ans_mask.unsqueeze(-1).expand_as(out)
-                    masked_diff = (org_out - out).float().abs() * ans_mask_expand
-                    loss = masked_diff.sum() / ans_mask_expand.sum()
-                else:
-                    # 无 mask：全局 MAE
-                    loss = (
-                        (org_out - out).float().abs().mean().item()
-                    )  # float prevents overflow
+            # 根据 loss_mode、mask 和 loss_reduction 选择不同的损失计算方式。
+            loss_parts = _compute_loss_parts(out)
 
             # 恢复 block 的原始权重，准备下一个 ratio 的尝试
             block.load_state_dict(org_sd)
-            return loss, scales
+            return loss_parts, scales
 
-        for ratio in range(n_grid):
-            # ratio ∈ {0, 0.02, 0.04, ..., 0.98}
-            ratio = ratio * 1 / n_grid
-            loss, scales = _evaluate_scale_ratio(ratio)
+        def _search_with_act_stat(act_stat):
+            # 基于激活值计算 x_max，用于构造候选 scale。
+            x_max = get_modality_aware_act_scale(
+                x,
+                ans_mask=ans_mask,
+                vis_mask=vis_mask,
+                reweight_ratio=reweight_ratio,
+                act_stat=act_stat,
+                eps=scale_search_config["eps"],
+            )
 
-            # ---- 记录当前 ratio 的 loss 并追踪最优 ----
-            history.append((ratio, loss))
-            is_best = loss < best_error
-            if is_best:
-                best_error = loss
-                best_ratio = ratio
-                best_scales = scales
+            best_error = float("inf")
+            best_ratio = -1
+            best_scales = None
+            best_loss_parts = None
+            history = []
 
-        # 第二阶段：在粗搜最优点附近做局部精细化搜索。
-        # 判断条件：第一阶段已经找到有效最优 ratio，且局部细搜网格点数大于 1。
-        if best_ratio != -1 and local_refine_grid > 1:
-            # 计算局部搜索区间的左边界，确保不低于 0.0。
-            refine_left = max(0.0, best_ratio - local_refine_half_span)
-            # 计算局部搜索区间的右边界，确保不超过 1.0。
-            refine_right = min(1.0, best_ratio + local_refine_half_span)
-            # 在 [refine_left, refine_right] 区间内均匀生成 local_refine_grid 个候选 ratio。
-            for ratio in torch.linspace(
-                refine_left, refine_right, steps=local_refine_grid
-            ).tolist():
-                # 将 tensor 转为 Python 原生 float 类型。
-                ratio = float(ratio)
-                # 调用局部评估函数，计算当前 ratio 下的量化误差和对应的 scale 张量。
-                loss, scales = _evaluate_scale_ratio(ratio)
-                # 将当前 ratio 和 loss 记录到历史日志中，便于后续调试分析。
-                history.append((ratio, loss))
-                # 判断当前 loss 是否小于目前已知的最优误差。
-                is_best = loss < best_error
-                # 如果当前 ratio 更优，则更新最优误差、最优 ratio 和最优 scale。
-                if is_best:
-                    best_error = loss
+            for ratio in range(n_grid):
+                # ratio ∈ {0, 0.02, 0.04, ..., 0.98}
+                ratio = ratio * 1 / n_grid
+                loss_parts, scales = _evaluate_scale_ratio(ratio, x_max)
+
+                history.append((ratio, loss_parts["loss"]))
+                if loss_parts["loss"] < best_error:
+                    best_error = loss_parts["loss"]
                     best_ratio = ratio
                     best_scales = scales
+                    best_loss_parts = loss_parts
 
-        # 安全检查：确保至少找到了一个有效的 ratio
-        if best_ratio == -1:
-            print(history)
-            raise Exception
+            # 第二阶段：在粗搜最优点附近做局部精细化搜索。
+            if best_ratio != -1 and local_refine_grid > 1:
+                refine_left = max(0.0, best_ratio - local_refine_half_span)
+                refine_right = min(1.0, best_ratio + local_refine_half_span)
+                for ratio in torch.linspace(
+                    refine_left, refine_right, steps=local_refine_grid
+                ).tolist():
+                    ratio = float(ratio)
+                    loss_parts, scales = _evaluate_scale_ratio(ratio, x_max)
+                    history.append((ratio, loss_parts["loss"]))
+                    if loss_parts["loss"] < best_error:
+                        best_error = loss_parts["loss"]
+                        best_ratio = ratio
+                        best_scales = scales
+                        best_loss_parts = loss_parts
+
+            if best_ratio == -1:
+                print(history)
+                raise Exception
+
+            return {
+                "act_stat": act_stat,
+                "best_ratio": float(best_ratio),
+                "best_loss": float(best_error),
+                "best_scales": best_scales,
+                "loss_parts": best_loss_parts,
+            }
+
+        candidate_results = [
+            _search_with_act_stat(act_stat)
+            for act_stat in scale_search_config["act_stat_candidates"]
+        ]
+        best_result = min(candidate_results, key=lambda item: item["best_loss"])
+        best_scales = best_result["best_scales"]
 
         # 展平为一维 [hidden_dim]
         best_scales = best_scales.view(-1)
 
         assert torch.isnan(best_scales).sum() == 0, best_scales
-        return best_scales.detach()
+        diagnostics = {
+            "act_stat": best_result["act_stat"],
+            "configured_act_stat": scale_search_config["act_stat"],
+            "candidate_results": [
+                {
+                    "act_stat": item["act_stat"],
+                    "best_ratio": item["best_ratio"],
+                    "best_loss": item["best_loss"],
+                    "ans_loss": item["loss_parts"].get("ans_loss"),
+                    "vis_loss": item["loss_parts"].get("vis_loss"),
+                    "ans_count": item["loss_parts"].get("ans_count"),
+                    "vis_count": item["loss_parts"].get("vis_count"),
+                }
+                for item in candidate_results
+            ],
+            "best_ratio": best_result["best_ratio"],
+            "best_loss": best_result["best_loss"],
+            "ans_loss": best_result["loss_parts"].get("ans_loss"),
+            "vis_loss": best_result["loss_parts"].get("vis_loss"),
+            "ans_count": best_result["loss_parts"].get("ans_count"),
+            "vis_count": best_result["loss_parts"].get("vis_count"),
+            "loss_mode": loss_mode,
+            "loss_reduction": scale_search_config["loss_reduction"],
+            "reweight_ratio": None
+            if reweight_ratio is None
+            else float(reweight_ratio),
+            "n_grid": n_grid,
+            "local_refine_grid": local_refine_grid,
+        }
+        return best_scales.detach(), diagnostics
 
     # ============================================================
     # 内部函数：包装 _search_module_scale，返回带名称的格式化结果
@@ -537,14 +647,22 @@ def auto_scale_block(
             assert len(layers) == 1
             module2inspect = layers[0]
 
-        scales = _search_module_scale(
+        scales, diagnostics = _search_module_scale(
             module2inspect, layers, inp, reweight_ratio, kwargs
         )
         scales = scales.detach().cpu()
         # 使用 get_op_name 获取相对于 module 的层内路径名
+        prev_op_name = get_op_name(module, prev_op)
+        layer_names = tuple([get_op_name(module, m) for m in layers])
+        if scale_diagnostics is not None:
+            diagnostics = dict(diagnostics)
+            diagnostics["prev_op"] = scale_prefix + prev_op_name
+            diagnostics["layers"] = [scale_prefix + name for name in layer_names]
+            diagnostics["module_class"] = module.__class__.__name__
+            scale_diagnostics.append(diagnostics)
         return (
-            get_op_name(module, prev_op),  # 如 "attention_norm"
-            tuple([get_op_name(module, m) for m in layers]),  # 如 ("attention.wqkv",)
+            prev_op_name,  # 如 "attention_norm"
+            layer_names,  # 如 ("attention.wqkv",)
             scales,  # [hidden_dim] 的 scale 向量
         )
 
@@ -879,7 +997,9 @@ def auto_scale_block(
                     module.attention.wqkv,
                 ],
                 inp=input_feat["attention.wqkv"],
-                reweight_ratio=reweight_ratio_dict["attn"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "attn_in", fallback_keys=("attn",)
+                ),
                 module2inspect=module.attention,
                 kwargs=module_kwargs,
             )
@@ -891,7 +1011,9 @@ def auto_scale_block(
                     prev_op=module.attention.wqkv,
                     layers=[module.attention.wo],
                     inp=input_feat["attention.wo"],
-                    reweight_ratio=reweight_ratio_dict["attn"],
+                    reweight_ratio=_get_reweight_ratio(
+                        reweight_ratio_dict, "attn_out", fallback_keys=("attn",)
+                    ),
                 )
             )
         # MLP 输入: ffn_norm → w1, w3 (gate/up 投影)
@@ -900,7 +1022,9 @@ def auto_scale_block(
                 prev_op=module.ffn_norm,
                 layers=[module.feed_forward.w1, module.feed_forward.w3],
                 inp=input_feat["feed_forward.w1"],
-                reweight_ratio=reweight_ratio_dict["mlp"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "mlp_in", fallback_keys=("mlp",)
+                ),
                 module2inspect=module.feed_forward,
             )
         )
@@ -910,7 +1034,9 @@ def auto_scale_block(
                 prev_op=module.feed_forward.w3,
                 layers=[module.feed_forward.w2],
                 inp=input_feat["feed_forward.w2"],
-                reweight_ratio=reweight_ratio_dict["mlp"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "mlp_out", fallback_keys=("mlp",)
+                ),
             )
         )
 

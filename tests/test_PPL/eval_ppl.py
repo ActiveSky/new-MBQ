@@ -88,6 +88,29 @@ def parse_ppl_args():
         help="Use asymmetric quantization with zero point",
     )
     parser.add_argument(
+        "--double_quant",
+        action="store_true",
+        help="Pseudo-quantize primary quantization scales during weight quantization",
+    )
+    parser.add_argument(
+        "--double_quant_scale_bit",
+        type=int,
+        default=8,
+        help="Bit width used for double-quantized primary scales",
+    )
+    parser.add_argument(
+        "--double_quant_scale_group",
+        type=int,
+        default=128,
+        help="Group size used for double-quantized primary scales",
+    )
+    parser.add_argument(
+        "--double_quant_zero_point",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use zero point when double-quantizing primary scales",
+    )
+    parser.add_argument(
         "--pseudo_quant",
         action="store_true",
         help="Apply MBQ pseudo quantization before PPL evaluation",
@@ -258,12 +281,52 @@ def load_mbq_state(scale_path: Optional[str]):
     return torch.load(scale_path, map_location="cpu")
 
 
+def build_quant_state_metadata(quant_state, args):
+    """Collect saved MBQ metadata for result JSON."""
+    if not args.pseudo_quant or quant_state is None:
+        return {}
+
+    low_rank_states = quant_state.get("low_rank", []) or []
+    linear_bit_map = quant_state.get("linear_bit_map", {}) or {}
+    linear_score_map = quant_state.get("linear_score_map", {}) or {}
+    svd_quant_states = [item for item in low_rank_states if item.get("svd_quant")]
+    svd_quant_config = {}
+    for item in low_rank_states:
+        if item.get("svd_quant_config"):
+            svd_quant_config = item["svd_quant_config"]
+            break
+
+    bit_counts = {}
+    for bit in linear_bit_map.values():
+        bit_key = str(int(bit))
+        bit_counts[bit_key] = bit_counts.get(bit_key, 0) + 1
+
+    return {
+        "low_rank_config": quant_state.get("low_rank_config", {}),
+        "svd_quant": bool(svd_quant_states),
+        "svd_quant_config": svd_quant_config,
+        "linear_mixed_config": quant_state.get("linear_mixed_config", {}),
+        "scale_search_config": quant_state.get("scale_search_config", {}),
+        "low_rank_count": len(low_rank_states),
+        "svd_quant_count": len(svd_quant_states),
+        "linear_bit_map_count": len(linear_bit_map),
+        "linear_score_map_count": len(linear_score_map),
+        "linear_bit_counts": bit_counts,
+    }
+
+
 def apply_mbq_quantization_to_model(model, quant_state, args):
     """将 MBQ 量化状态应用到 process_model.model。"""
     base_model = model.model
     q_config = {
         "zero_point": args.zero_point,
         "q_group_size": args.w_group,
+        "double_quant": args.double_quant,
+        "double_quant_config": {
+            "scale_bit": args.double_quant_scale_bit,
+            "scale_group": args.double_quant_scale_group,
+            "zero_point": args.double_quant_zero_point,
+        },
     }
     wa_quant = args.w_bit < 16 and args.a_bit < 16
 
@@ -342,6 +405,7 @@ def evaluate_single_dataset(model, tokenizer, dataset_name: str, args) -> Dict:
         "quantized": args.pseudo_quant,
         "method": "mbq" if args.pseudo_quant else "fp16",
         "mixed_probe": args.mixed_probe if args.pseudo_quant else False,
+        "double_quant": args.double_quant if args.pseudo_quant else False,
     }
 
     logger.info(f"{dataset_name} Results: PPL={ppl:.4f}, NLL={nll:.4f}")
@@ -388,14 +452,18 @@ def main():
     logger.info(f"Model loaded: {args.model_args}")
 
     # ========== Step 2: 应用 MBQ 量化（如果启用） ==========
+    quant_state = None
+    quant_state_metadata = {}
     if args.pseudo_quant:
         logger.info("Applying MBQ quantization...")
         quant_state = load_mbq_state(args.scale_path)
+        quant_state_metadata = build_quant_state_metadata(quant_state, args)
         process_model = apply_mbq_quantization_to_model(
             process_model, quant_state, args
         )
         logger.info(
-            f"MBQ quantization applied: w_bit={args.w_bit}, a_bit={args.a_bit}, pseudo_quant={args.pseudo_quant}"
+            f"MBQ quantization applied: w_bit={args.w_bit}, a_bit={args.a_bit}, "
+            f"pseudo_quant={args.pseudo_quant}, double_quant={args.double_quant}"
         )
 
     # ========== Step 3: 评估 PPL ==========
@@ -425,6 +493,7 @@ def main():
 
     output_data = {
         "args": vars(args),
+        "quant_state": quant_state_metadata,
         "results": results_list,
         "summary": {
             "avg_ppl": np.mean([r["ppl"] for r in results_list]),
@@ -432,6 +501,7 @@ def main():
             "quantized": args.pseudo_quant,
             "method": "mbq" if args.pseudo_quant else "fp16",
             "mixed_probe": args.mixed_probe if args.pseudo_quant else False,
+            "double_quant": args.double_quant if args.pseudo_quant else False,
         },
     }
 

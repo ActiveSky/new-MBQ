@@ -15,18 +15,21 @@ text_data_path: "" # You should specify this arg if you want to use interleave_f
 method: mbq
 run_process: True
 w_bit: 2
-w_group: 64
+w_group: 32
 distort: False # if True, use distort feature map during scale search process
 reweight: True # if True, use avg gradient to reweight the loss of each modality
 reweight_cache_path: "scale_cache/mbq/reweight/internvl2_8b_reweight.pt" # the path to cache the avg gradient for reweighting
 loss_mode: mae
 scale_search_config:
-  act_stat: modality_mean # global | token_weighted | modality_mean
+  act_stat: modality_mean # auto, global, token_weighted, modality_mean
+  act_stat_candidates: [ token_weighted, modality_mean]
+  loss_reduction: modality_mean
+  scale_group_reweight: true # if true, use attn_in/attn_out/mlp_in/mlp_out reweight; false keeps legacy attn/mlp
 low_rank: True # if True, use low rank decomposition to optimize the scale search process
 low_rank_config:
   rank: 128 # the rank for low rank decomposition
-  attn_topk_ratio: 0.2
-  mlp_topk_ratio: 0.2
+  attn_topk_ratio: 0.6
+  mlp_topk_ratio: 0.6
 svd_quant: True # if True, pseudo-quantize low-rank SVD factors after decomposition
 svd_quant_config:
   up:
@@ -43,13 +46,13 @@ svd_quant_config:
 linear_mixed_probe: True
 linear_mixed_config:
   high_bit: 3
-  keep_ratio: 0.1
+  keep_ratio: 0.4
 
 double_quant: True
 double_quant_config:
-  scale_bit: 8
-  scale_group: 128
+  scale_bit: 4
+  scale_group: 32
   zero_point: True 
 
 # output args
-scale_path: scale_cache/mbq/internvl2_8b_w2g64_svd_r_128_svdq4.pt
+scale_path: scale_cache/mbq/internvl2_8b_w2g32_scale_modality_loss_new_reweight_new_svd_r_128_svd_q4_topk_0.6_mixed_0.4_divide_double_4_32.pt

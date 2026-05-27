@@ -9,15 +9,17 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # ========== 配置参数 ==========
-GPU_ID=5  # GPU device ID
+GPU_ID=0  # GPU device ID
 MODEL_NAME="internvl2"
 MODEL_PATH="OpenGVLab/InternVL2-8B"
 W_BIT=2
-W_GROUP=64
+W_GROUP=32
 A_BIT=16
+DOUBLE_QUANT_SCALE_BIT=4
+DOUBLE_QUANT_SCALE_GROUP=32
 DATASET="wikitext2"
 N_SAMPLES=256
-SCALE_FILE_NAME="internvl2_8b_w2g64_svd.pt"
+SCALE_FILE_NAME="internvl2_8b_w2g32_scale_modality_loss_new_reweight_new_svd_r_128_svd_q4_topk_0.6_mixed_0.4_divide_double_4_32.pt"
 SCALE_PATH="$REPO_ROOT/scale_cache/mbq/$SCALE_FILE_NAME"
 RESULT_DIR="$REPO_ROOT/outputs/ppl"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
@@ -48,6 +50,9 @@ fi
         --w_bit "$W_BIT" \
         --w_group "$W_GROUP" \
         --a_bit "$A_BIT" \
+        --double_quant \
+        --double_quant_scale_bit "$DOUBLE_QUANT_SCALE_BIT" \
+        --double_quant_scale_group "$DOUBLE_QUANT_SCALE_GROUP" \
         --pseudo_quant \
         --output_path "$RESULT_JSON" \
         --low_rank \

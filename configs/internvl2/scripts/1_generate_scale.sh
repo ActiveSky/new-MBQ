@@ -7,7 +7,7 @@ set -e
 # Configuration
 CONFIG_PATH="configs/internvl2/MBQ_search/my_8b_weight_only_svd.yaml"  # Change this to your model path
 LOG_DIR="./logs"  # Directory to save logs
-LOG_FILE="${LOG_DIR}/internvl2_8b_w2g32_scale_modality_loss_new_reweight_new_svd_r_128_svd_q4_topk_0.6_mixed_0.4_divide_double_4_32.log"  # Log file name
+LOG_FILE="${LOG_DIR}/internvl2_8b_w2g32_scale_reweight_true_svd_1.0_mixed_0.2.log"  # Log file name
 GPU_ID=0  # GPU device ID
 
 mkdir -p "${LOG_DIR}"

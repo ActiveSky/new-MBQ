@@ -105,6 +105,7 @@ def parse_quant_args() -> argparse.Namespace:
     parser.add_argument("--w_group", default=128, type=int)
     parser.add_argument("--alpha", default=0.5, type=int)
     parser.add_argument("--reweight", action="store_true")
+    parser.add_argument("--reweight_group", action="store_true")
     parser.add_argument("--reweight_cache_path", default=None, type=str)
     parser.add_argument("--distort", action="store_true")
     parser.add_argument("--loss_mode", default="mae", choices=["mae", "mse"])

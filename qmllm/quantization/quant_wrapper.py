@@ -43,6 +43,7 @@ def qwrapper(model, prompt_inputs, prompt_kwargs, args):
             a_bit=args.a_bit,
             wa_quant=wa_quant,
             reweight=args.reweight,
+            reweight_group=getattr(args, "reweight_group", False),
             reweight_cache_path=args.reweight_cache_path,
             distort=args.distort,
             loss_mode=args.loss_mode,

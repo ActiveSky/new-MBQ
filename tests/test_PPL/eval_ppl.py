@@ -149,9 +149,22 @@ class PPLDataset:
         )
 
     @staticmethod
-    def load_ptb(tokenizer, n_samples=128, seq_len=2048):
+    def load_ptb(tokenizer, n_samples=128, seq_len=2048, data_path=""):
         """加载 PTB 数据集"""
         logger.info("Loading PTB dataset...")
+        if data_path:
+            ptb_path = data_path
+            if os.path.isdir(ptb_path):
+                ptb_path = os.path.join(ptb_path, "ptb.test.txt")
+            if not os.path.exists(ptb_path):
+                raise FileNotFoundError(f"PTB local data file not found: {ptb_path}")
+            logger.info(f"Loading PTB local text from {ptb_path}")
+            with open(ptb_path, "r", encoding="utf-8") as f:
+                dataset = [{"sentence": line.rstrip("\n")} for line in f]
+            return PPLDataset._process_text_dataset(
+                dataset, tokenizer, n_samples, seq_len, "sentence"
+            )
+
         dataset = load_dataset("ptb_text_only", "penn_treebank", split="test")
         return PPLDataset._process_text_dataset(
             dataset, tokenizer, n_samples, seq_len, "sentence"
@@ -381,7 +394,9 @@ def evaluate_single_dataset(model, tokenizer, dataset_name: str, args) -> Dict:
     if dataset_name == "wikitext2":
         samples = PPLDataset.load_wikitext2(tokenizer, args.n_samples, args.seq_len)
     elif dataset_name == "ptb":
-        samples = PPLDataset.load_ptb(tokenizer, args.n_samples, args.seq_len)
+        samples = PPLDataset.load_ptb(
+            tokenizer, args.n_samples, args.seq_len, args.data_path
+        )
     elif dataset_name == "c4":
         samples = PPLDataset.load_c4(tokenizer, args.n_samples, args.seq_len)
     elif dataset_name == "pileval":

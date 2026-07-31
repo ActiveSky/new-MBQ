@@ -1,0 +1,46 @@
+{
+  "source_analysis": "act_for_ck/wo_all_w2_w3_48/_ck_analysis.json",
+  "source_global_meta": "act_for_ck/wo_all_w2_w3_48/_global_meta.json",
+  "source_cache_48": "scale_cache/mbq/internvl2_8b_w2g32_scale_reweight_true_svd_1.0_custom_wo_all_w2_w3_48.pt",
+  "cache_55": "scale_cache/mbq/internvl2_8b_w2g32_scale_reweight_true_svd_1.0_custom_wo_all_w2_w3_55.pt",
+  "cache_42": "scale_cache/mbq/internvl2_8b_w2g32_scale_reweight_true_svd_1.0_custom_wo_w2_w3_42.pt",
+  "ranks": [
+    16,
+    32,
+    48,
+    64,
+    96,
+    128
+  ],
+  "q_config_expected": {
+    "zero_point": true,
+    "q_group_size": 32,
+    "double_quant": true,
+    "double_quant_config": {
+      "scale_bit": 4,
+      "scale_group": 32,
+      "zero_point": true
+    }
+  },
+  "scale_compatible_55_vs_48": true,
+  "scale_compatible_42_vs_48": true,
+  "score_map_identical_55_vs_48": true,
+  "score_map_identical_42_vs_48": true,
+  "line_55": {
+    "low_rank_count": 105,
+    "reusable": 105,
+    "deferred_missing": 0,
+    "not_reusable": 0,
+    "expected_reusable": 105
+  },
+  "line_42": {
+    "low_rank_count": 118,
+    "reusable": 103,
+    "deferred_missing": 15,
+    "not_reusable": 0,
+    "expected_reusable": 103,
+    "expected_deferred_wo": 15
+  },
+  "not_reusable_rows": [],
+  "deferred_family": "wo"
+}

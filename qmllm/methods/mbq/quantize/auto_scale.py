@@ -725,7 +725,9 @@ def auto_scale_block(
                     module.self_attn.v_proj,
                 ],
                 inp=input_feat["self_attn.q_proj"],
-                reweight_ratio=reweight_ratio_dict["attn"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "attn_in", fallback_keys=("attn",)
+                ),
                 module2inspect=module.self_attn,
                 kwargs=module_kwargs,
             )
@@ -739,7 +741,9 @@ def auto_scale_block(
                     prev_op=module.self_attn.v_proj,
                     layers=[module.self_attn.o_proj],
                     inp=input_feat["self_attn.o_proj"],
-                    reweight_ratio=reweight_ratio_dict["attn"],
+                    reweight_ratio=_get_reweight_ratio(
+                        reweight_ratio_dict, "attn_out", fallback_keys=("attn",)
+                    ),
                 )
             )
         # MLP 输入: post_attention_layernorm → gate_proj, up_proj
@@ -748,7 +752,9 @@ def auto_scale_block(
                 prev_op=module.post_attention_layernorm,
                 layers=[module.mlp.gate_proj, module.mlp.up_proj],
                 inp=input_feat["mlp.gate_proj"],
-                reweight_ratio=reweight_ratio_dict["mlp"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "mlp_in", fallback_keys=("mlp",)
+                ),
                 module2inspect=module.mlp,
             )
         )
@@ -758,7 +764,9 @@ def auto_scale_block(
                 prev_op=module.mlp.up_proj,
                 layers=[module.mlp.down_proj],
                 inp=input_feat["mlp.down_proj"],
-                reweight_ratio=reweight_ratio_dict["mlp"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "mlp_out", fallback_keys=("mlp",)
+                ),
             )
         )
 
@@ -952,7 +960,9 @@ def auto_scale_block(
                     module.self_attn.v_proj,
                 ],
                 inp=input_feat["self_attn.q_proj"],
-                reweight_ratio=reweight_ratio_dict["attn"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "attn_in", fallback_keys=("attn",)
+                ),
                 module2inspect=module.self_attn,
                 kwargs=module_kwargs,
             )
@@ -964,7 +974,9 @@ def auto_scale_block(
                     prev_op=module.self_attn.v_proj,
                     layers=[module.self_attn.o_proj],
                     inp=input_feat["self_attn.o_proj"],
-                    reweight_ratio=reweight_ratio_dict["attn"],
+                    reweight_ratio=_get_reweight_ratio(
+                        reweight_ratio_dict, "attn_out", fallback_keys=("attn",)
+                    ),
                 )
             )
         # MLP 输入: LN → gate_proj, up_proj
@@ -973,7 +985,9 @@ def auto_scale_block(
                 prev_op=module.post_attention_layernorm,
                 layers=[module.mlp.gate_proj, module.mlp.up_proj],
                 inp=input_feat["mlp.gate_proj"],
-                reweight_ratio=reweight_ratio_dict["mlp"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "mlp_in", fallback_keys=("mlp",)
+                ),
                 module2inspect=module.mlp,
             )
         )
@@ -983,7 +997,9 @@ def auto_scale_block(
                 prev_op=module.mlp.up_proj,
                 layers=[module.mlp.down_proj],
                 inp=input_feat["mlp.down_proj"],
-                reweight_ratio=reweight_ratio_dict["mlp"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "mlp_out", fallback_keys=("mlp",)
+                ),
             )
         )
     elif module.__class__.__name__ == "InternLM2DecoderLayer":
@@ -1040,7 +1056,7 @@ def auto_scale_block(
             )
         )
 
-    elif module.__class__.__name__ == "Qwen2VLDecoderLayer":  # 新加的Qwen2vl处理模块
+    elif module.__class__.__name__ in {"Qwen2VLDecoderLayer", "Qwen2_5_VLDecoderLayer"}:  # 新加的Qwen2vl处理模块
         # -------------------- Qwen2-VL 模型 --------------------
         # 结构与 Qwen2 相同，MBQ 新增的多模态模型适配
         # attention 输入: LN → Q,K,V
@@ -1053,7 +1069,9 @@ def auto_scale_block(
                     module.self_attn.v_proj,
                 ],
                 inp=input_feat["self_attn.q_proj"],
-                reweight_ratio=reweight_ratio_dict["attn"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "attn_in", fallback_keys=("attn",)
+                ),
                 module2inspect=module.self_attn,
                 kwargs=module_kwargs,
             )
@@ -1065,7 +1083,9 @@ def auto_scale_block(
                     prev_op=module.self_attn.v_proj,
                     layers=[module.self_attn.o_proj],
                     inp=input_feat["self_attn.o_proj"],
-                    reweight_ratio=reweight_ratio_dict["attn"],
+                    reweight_ratio=_get_reweight_ratio(
+                        reweight_ratio_dict, "attn_out", fallback_keys=("attn",)
+                    ),
                 )
             )
         # MLP 输入: LN → gate_proj, up_proj
@@ -1074,7 +1094,9 @@ def auto_scale_block(
                 prev_op=module.post_attention_layernorm,
                 layers=[module.mlp.gate_proj, module.mlp.up_proj],
                 inp=input_feat["mlp.gate_proj"],
-                reweight_ratio=reweight_ratio_dict["mlp"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "mlp_in", fallback_keys=("mlp",)
+                ),
                 module2inspect=module.mlp,
             )
         )
@@ -1084,7 +1106,9 @@ def auto_scale_block(
                 prev_op=module.mlp.up_proj,
                 layers=[module.mlp.down_proj],
                 inp=input_feat["mlp.down_proj"],
-                reweight_ratio=reweight_ratio_dict["mlp"],
+                reweight_ratio=_get_reweight_ratio(
+                    reweight_ratio_dict, "mlp_out", fallback_keys=("mlp",)
+                ),
             )
         )
     else:

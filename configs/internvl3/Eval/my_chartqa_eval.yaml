@@ -1,0 +1,54 @@
+batch_size: 1
+model: internvl3
+model_args: pretrained=OpenGVLab/InternVL3-1B-Instruct
+tasks: chartqa
+output_path: outputs/my-internvl3-1b/chartqa/internvl3_1b_w2g32_scale_reweight_true_svd_1.0_mixed_0.3
+log_samples: true
+log_samples_suffix: chartqa
+
+method: mbq
+run_process: false
+pseudo_quant: true
+w_bit: 2
+w_group: 32
+distort: false
+
+reweight: true
+reweight_group: true
+reweight_cache_path: scale_cache/mbq/reweight/internvl3_1b_reweight_group.pt
+loss_mode: mae
+scale_search_config:
+  act_stat: modality_mean
+  act_stat_candidates: [token_weighted, modality_mean]
+  loss_reduction: modality_mean
+
+low_rank: true
+low_rank_config:
+  rank: 128
+  attn_topk_ratio: 1.0
+  mlp_topk_ratio: 1.0
+svd_quant: true
+svd_quant_config:
+  up:
+    weight_quant: per_channel
+    quant_bit: 4
+    quant_axis: out_channel
+    zero_point: false
+  down:
+    weight_quant: per_channel
+    quant_bit: 4
+    quant_axis: in_channel
+    zero_point: false
+
+linear_mixed_probe: true
+linear_mixed_config:
+  high_bit: 3
+  keep_ratio: 0.3
+
+double_quant: true
+double_quant_config:
+  scale_bit: 4
+  scale_group: 32
+  zero_point: true
+
+scale_path: scale_cache/mbq/internvl3_1b_w2g32_scale_reweight_true_svd_1.0_mixed_0.3.pt

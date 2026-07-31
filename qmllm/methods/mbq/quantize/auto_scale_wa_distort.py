@@ -728,7 +728,7 @@ def auto_scale_block_wa_distort(module, module_kwargs, w_bit, a_bit, q_config, i
                 reweight_ratio=reweight_ratio_dict["mlp"],
             )
         )
-    elif module.__class__.__name__ == "Qwen2VLDecoderLayer":
+    elif module.__class__.__name__ in {"Qwen2VLDecoderLayer", "Qwen2_5_VLDecoderLayer"}:
         # attention input
         input_feat_q = _auto_get_input_feat_distort(
             inps_q=q_input,

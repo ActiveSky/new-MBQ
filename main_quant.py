@@ -9,6 +9,7 @@
 
 import argparse
 import datetime
+import inspect
 import importlib
 import json
 import os
@@ -31,6 +32,13 @@ from qmllm.quantization.quant_wrapper import qwrapper
 from qmllm.models import get_process_model
 from qmllm.calibration.pileval import get_calib_dataset
 from qmllm.calibration.coco_vl import get_multimodal_calib_dataset
+
+
+def _get_lmms_model_class(model_name, force_simple=True):
+    get_model_params = inspect.signature(get_model).parameters
+    if "force_simple" in get_model_params:
+        return get_model(model_name, force_simple=force_simple)
+    return get_model(model_name)
 
 
 def _dict_arg(value: Union[str, dict, None]) -> dict:
@@ -165,7 +173,7 @@ def cli_quant_single(args: Union[argparse.Namespace, None] = None) -> None:
         args.model_args = ""
 
     # 先根据 `model` 选择 lmms-eval 中对应的模型封装并加载基座模型。
-    ModelClass = get_model(args.model)
+    ModelClass = _get_lmms_model_class(args.model, force_simple=True)
     lm = ModelClass.create_from_arg_string(
         args.model_args,
         {

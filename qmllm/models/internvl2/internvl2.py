@@ -485,8 +485,12 @@ class InternVL2(BaseModel):
         return prompt_inputs, prompt_kwargs
         
 
+    def _get_data_collator_pad_id(self):
+        """Keep the legacy InternVL2 padding convention by default."""
+        return 0
+
     def data_collator(self, instances):
-        pad_id = 0
+        pad_id = self._get_data_collator_pad_id()
         IGNORE_INDEX = -100
         first = instances[0]
         batch = {}
@@ -538,4 +542,3 @@ class InternVL2(BaseModel):
             if k in ('sample_id'):
                 batch[k] = [f[k] for f in instances]
         return batch
-

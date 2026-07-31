@@ -1,0 +1,114 @@
+{
+  "custom_wo_all_w2_w3_55": {
+    "ocrbench": 697,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r64": {
+    "ocrbench": 699,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r32": {
+    "ocrbench": 694,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r32/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r16": {
+    "ocrbench": 695,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r16/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r64_w2_r64": {
+    "ocrbench": 700,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r64_w2_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r64_w3_r64": {
+    "ocrbench": 695,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r64_w3_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r64_w1_r64": {
+    "ocrbench": 694,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r64_w1_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r64_w1_r64_w3_r64": {
+    "ocrbench": 690,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r64_w1_r64_w3_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r32_w3_r64": {
+    "ocrbench": 690,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r32_w3_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r16_w3_r64": {
+    "ocrbench": 681,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r16_w3_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r16_w1_r64": {
+    "ocrbench": 689,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r16_w1_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r64_w3_r32": {
+    "ocrbench": 692,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r64_w3_r32/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r16_w3_r32": {
+    "ocrbench": 687,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r16_w3_r32/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r16_w1_r64_w3_r64": {
+    "ocrbench": 687,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r16_w1_r64_w3_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_55_wqkv_r32_w1_r64_w3_r64": {
+    "ocrbench": 686,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_55_wqkv_r32_w1_r64_w3_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42": {
+    "ocrbench": 694,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r64": {
+    "ocrbench": 696,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r32": {
+    "ocrbench": 695,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r32/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r16": {
+    "ocrbench": 689,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r16/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r32_w3_r64": {
+    "ocrbench": 693,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r32_w3_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r32_w1_r64": {
+    "ocrbench": 692,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r32_w1_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r32_w3_r32": {
+    "ocrbench": 692,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r32_w3_r32/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r32_w1_r64_w3_r64": {
+    "ocrbench": 692,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r32_w1_r64_w3_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r32_w3_r64_wo_r32": {
+    "ocrbench": 692,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r32_w3_r64_wo_r32/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r32_w1_r64_w3_r64_wo_r32": {
+    "ocrbench": 683,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r32_w1_r64_w3_r64_wo_r32/results/ocrbench_results.txt"
+  },
+  "custom_wo_w2_w3_42_wqkv_r32_w3_r64_w2_r64": {
+    "ocrbench": 684,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_w2_w3_42_wqkv_r32_w3_r64_w2_r64/results/ocrbench_results.txt"
+  },
+  "custom_wo_all_w2_w3_48": {
+    "ocrbench": 676,
+    "result_txt": "outputs/my-internvl2-8b/custom_wo_all_w2_w3_48/results/ocrbench_results.txt"
+  },
+  "w2g32_scale_reweight_true_svd_1.0_mixed_0.3": {
+    "ocrbench": 701,
+    "result_txt": "outputs/my-internvl2-8b/w2g32_scale_reweight_true_svd_1.0_mixed_0.3/results/ocrbench_results.txt"
+  }
+}

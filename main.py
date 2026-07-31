@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import inspect
 import importlib
 import json
 import os
@@ -36,6 +37,19 @@ from qmllm.quantization.quant_wrapper import qwrapper
 from qmllm.models import get_process_model
 from qmllm.calibration.pileval import get_calib_dataset
 from qmllm.calibration.coco_vl import get_multimodal_calib_dataset
+
+
+def _get_lmms_model_class(model_name, force_simple=True):
+    get_model_params = inspect.signature(get_model).parameters
+    if "force_simple" in get_model_params:
+        return get_model(model_name, force_simple=force_simple)
+    return get_model(model_name)
+
+
+def _ensure_lmms_eval_args(args):
+    if not hasattr(args, "process_with_media"):
+        args.process_with_media = False
+    return args
 
 
 def _dict_arg(value: Union[str, dict, None]) -> dict:
@@ -252,6 +266,12 @@ def parse_eval_args() -> argparse.Namespace:
         help="Additional path to include if there are external tasks to include.",
     )
     parser.add_argument(
+        "--process_with_media",
+        action="store_true",
+        default=False,
+        help="Keep media in documents during result processing for tasks that require it.",
+    )
+    parser.add_argument(
         "--gen_kwargs",
         default="",
         help=(
@@ -455,6 +475,7 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
 
 
 def cli_evaluate_single(args: Union[argparse.Namespace, None] = None) -> None:
+    args = _ensure_lmms_eval_args(args)
     selected_task_list = args.tasks.split(",") if args.tasks else None
 
     if args.include_path is not None:
@@ -580,7 +601,7 @@ def cli_evaluate_single(args: Union[argparse.Namespace, None] = None) -> None:
     if args.model_args is None:
         args.model_args = ""
 
-    ModelClass = get_model(args.model)
+    ModelClass = _get_lmms_model_class(args.model, force_simple=True)
     lm = ModelClass.create_from_arg_string(
         args.model_args,
         {
@@ -603,36 +624,44 @@ def cli_evaluate_single(args: Union[argparse.Namespace, None] = None) -> None:
         #
         qwrapper(process_model, prompt_inputs, prompt_kwargs, args)
 
-    results = evaluator.simple_evaluate(
-        model=args.model,
-        lm=lm,
-        model_args=args.model_args,
-        tasks=task_names,
-        num_fewshot=args.num_fewshot,
-        batch_size=args.batch_size,
-        max_batch_size=args.max_batch_size,
-        device=args.device,
-        use_cache=args.use_cache,
-        limit=args.limit,
-        check_integrity=args.check_integrity,
-        write_out=args.write_out,
-        log_samples=args.log_samples,
-        evaluation_tracker=evaluation_tracker,
-        system_instruction=args.system_instruction,
-        apply_chat_template=args.apply_chat_template,
-        fewshot_as_multiturn=args.fewshot_as_multiturn,
-        gen_kwargs=args.gen_kwargs,
-        task_manager=task_manager,
-        verbosity=args.verbosity,
-        predict_only=args.predict_only,
-        random_seed=args.seed[0],
-        numpy_random_seed=args.seed[1],
-        torch_random_seed=args.seed[2],
-        fewshot_random_seed=args.seed[3],
-        cli_args=args,
-        datetime_str=datetime_str,
+    simple_evaluate_kwargs = {
+        "model_args": args.model_args,
+        "tasks": task_names,
+        "num_fewshot": args.num_fewshot,
+        "batch_size": args.batch_size,
+        "max_batch_size": args.max_batch_size,
+        "device": args.device,
+        "use_cache": args.use_cache,
+        "limit": args.limit,
+        "check_integrity": args.check_integrity,
+        "write_out": args.write_out,
+        "log_samples": args.log_samples,
+        "evaluation_tracker": evaluation_tracker,
+        "system_instruction": args.system_instruction,
+        "apply_chat_template": args.apply_chat_template,
+        "fewshot_as_multiturn": args.fewshot_as_multiturn,
+        "gen_kwargs": args.gen_kwargs,
+        "task_manager": task_manager,
+        "verbosity": args.verbosity,
+        "predict_only": args.predict_only,
+        "random_seed": args.seed[0],
+        "numpy_random_seed": args.seed[1],
+        "torch_random_seed": args.seed[2],
+        "fewshot_random_seed": args.seed[3],
+        "cli_args": args,
+        "datetime_str": datetime_str,
         **request_caching_args,
-    )
+    }
+    simple_evaluate_params = inspect.signature(evaluator.simple_evaluate).parameters
+    if "lm" in simple_evaluate_params:
+        simple_evaluate_kwargs["model"] = args.model
+        simple_evaluate_kwargs["lm"] = lm
+    else:
+        simple_evaluate_kwargs["model"] = lm
+        if "force_simple" in simple_evaluate_params:
+            simple_evaluate_kwargs["force_simple"] = True
+
+    results = evaluator.simple_evaluate(**simple_evaluate_kwargs)
 
     if results is not None:
         if args.log_samples:

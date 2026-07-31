@@ -1,0 +1,24 @@
+  File: act_for_ck/wo_all_w2_w3_48/_global_meta.json
+  Size: 26562     	Blocks: 56         IO Block: 4096   regular file
+Device: fd00h/64768d	Inode: 192034527   Links: 1
+Access: (0664/-rw-rw-r--)  Uid: ( 1003/ Mayinyi)   Gid: ( 1003/ Mayinyi)
+Access: 2026-07-13 10:46:48.177370117 +0000
+Modify: 2026-07-05 12:16:38.278896224 +0000
+Change: 2026-07-05 12:16:38.278896224 +0000
+ Birth: 2026-07-05 12:16:38.278896224 +0000
+  File: act_for_ck/wo_all_w2_w3_48/_ck_analysis.json
+  Size: 25906666  	Blocks: 50600      IO Block: 4096   regular file
+Device: fd00h/64768d	Inode: 192035205   Links: 1
+Access: (0664/-rw-rw-r--)  Uid: ( 1003/ Mayinyi)   Gid: ( 1003/ Mayinyi)
+Access: 2026-07-13 08:32:10.625494305 +0000
+Modify: 2026-07-05 13:10:21.441831014 +0000
+Change: 2026-07-05 13:10:21.441831014 +0000
+ Birth: 2026-07-05 13:10:20.061846602 +0000
+  File: act_for_ck/wo_all_w2_w3_48/_ck_summary.csv
+  Size: 17320     	Blocks: 40         IO Block: 4096   regular file
+Device: fd00h/64768d	Inode: 192035208   Links: 1
+Access: (0664/-rw-rw-r--)  Uid: ( 1003/ Mayinyi)   Gid: ( 1003/ Mayinyi)
+Access: 2026-07-13 08:32:10.625494305 +0000
+Modify: 2026-07-05 13:10:21.441831014 +0000
+Change: 2026-07-05 13:10:21.441831014 +0000
+ Birth: 2026-07-05 13:10:21.441831014 +0000

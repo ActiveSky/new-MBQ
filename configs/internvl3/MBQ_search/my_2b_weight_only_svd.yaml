@@ -1,0 +1,59 @@
+# model args
+model: internvl3
+model_args: pretrained=OpenGVLab/InternVL3-2B
+
+# calibration data args
+calib_data: coco
+n_samples: 128
+data_path: "my-datasets/coco/data.json"
+image_folder: "my-datasets"
+few_shot_format: False # if True, concat two samples to simulate few shot
+interleave_format: False # if True, insert pure text data between two image-text pairs to simulate interleave data
+text_data_path: "" # You should specify this arg if you want to use interleave_format 
+
+# quantization config
+method: mbq
+run_process: True
+w_bit: 2
+w_group: 32
+distort: False # if True, use distort feature map during scale search process
+reweight: True # if True, use avg gradient to reweight the loss of each modality
+reweight_group: True  # if true, use attn_in/attn_out/mlp_in/mlp_out reweight; false keeps legacy attn/mlp
+reweight_cache_path: "scale_cache/mbq/reweight/internvl3_2b_reweight_group.pt" # the path to cache the avg gradient for reweighting
+loss_mode: mae
+scale_search_config:
+  act_stat: modality_mean # auto, global, token_weighted, modality_mean
+  act_stat_candidates: [ token_weighted, modality_mean]
+  loss_reduction: modality_mean
+  
+low_rank: True # if True, use low rank decomposition to optimize the scale search process
+low_rank_config:
+  rank: 128 # the rank for low rank decomposition
+  attn_topk_ratio: 1.0
+  mlp_topk_ratio: 1.0
+svd_quant: True # if True, pseudo-quantize low-rank SVD factors after decomposition
+svd_quant_config:
+  up:
+    weight_quant: per_channel
+    quant_bit: 4
+    quant_axis: out_channel
+    zero_point: False
+  down:
+    weight_quant: per_channel
+    quant_bit: 4
+    quant_axis: in_channel
+    zero_point: False
+
+linear_mixed_probe: True
+linear_mixed_config:
+  high_bit: 3
+  keep_ratio: 0.3
+
+double_quant: True
+double_quant_config:
+  scale_bit: 4
+  scale_group: 32
+  zero_point: True 
+
+# output args
+scale_path: scale_cache/mbq/internvl3_2b_w2g32_scale_reweight_true_svd_1.0_mixed_0.3.pt

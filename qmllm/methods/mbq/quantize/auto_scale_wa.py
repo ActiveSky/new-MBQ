@@ -620,7 +620,7 @@ def auto_scale_block_wa(module, module_kwargs, w_bit, a_bit, q_config, input_fea
             )
         )
 
-    elif module.__class__.__name__ == "Qwen2VLDecoderLayer":
+    elif module.__class__.__name__ in {"Qwen2VLDecoderLayer", "Qwen2_5_VLDecoderLayer"}:
         # attention input
         scales_list.append(
             _auto_get_scale_wa(
@@ -678,4 +678,3 @@ def auto_scale_block_wa(module, module_kwargs, w_bit, a_bit, q_config, input_fea
         raise NotImplementedError(f"{type(module)} not supported yet!")
 
     return scales_list
-

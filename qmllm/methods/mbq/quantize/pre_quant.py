@@ -32,20 +32,57 @@ __all__ = ["run_mbq"]
 
 @torch.no_grad()
 def _get_internvl2_candidate_specs(reweight_group=False):
-    if reweight_group:
-        return [
-            ("attention.wqkv", "attention_wqkv", "attn_in"),
-            ("attention.wo", "attention_wo", "attn_out"),
-            ("feed_forward.w1", "mlp_w1", "mlp_in"),
-            ("feed_forward.w3", "mlp_w3", "mlp_in"),
-            ("feed_forward.w2", "mlp_w2", "mlp_out"),
-        ]
+    return _get_linear_candidate_specs("InternLM2DecoderLayer", reweight_group)
+
+
+@torch.no_grad()
+def _get_qwen2vl_candidate_specs(reweight_group=False):
+    return _get_linear_candidate_specs("Qwen2VLDecoderLayer", reweight_group)
+
+
+@torch.no_grad()
+def _get_linear_candidate_specs(layer_or_class_name, reweight_group=False):
+    layer_class_name = (
+        layer_or_class_name
+        if isinstance(layer_or_class_name, str)
+        else layer_or_class_name.__class__.__name__
+    )
+
+    internvl2_specs = [
+        ("attention.wqkv", "attention_wqkv", "attn_in", "attn"),
+        ("attention.wo", "attention_wo", "attn_out", "attn"),
+        ("feed_forward.w1", "mlp_w1", "mlp_in", "mlp"),
+        ("feed_forward.w3", "mlp_w3", "mlp_in", "mlp"),
+        ("feed_forward.w2", "mlp_w2", "mlp_out", "mlp"),
+    ]
+    qwen2vl_specs = [
+        ("self_attn.q_proj", "attention_q_proj", "attn_in", "attn"),
+        ("self_attn.k_proj", "attention_k_proj", "attn_in", "attn"),
+        ("self_attn.v_proj", "attention_v_proj", "attn_in", "attn"),
+        ("self_attn.o_proj", "attention_o_proj", "attn_out", "attn"),
+        ("mlp.gate_proj", "mlp_gate_proj", "mlp_in", "mlp"),
+        ("mlp.up_proj", "mlp_up_proj", "mlp_in", "mlp"),
+        ("mlp.down_proj", "mlp_down_proj", "mlp_out", "mlp"),
+    ]
+
+    if layer_class_name == "InternLM2DecoderLayer":
+        specs = internvl2_specs
+    elif layer_class_name in {
+        "Qwen2VLDecoderLayer",
+        "Qwen2_5_VLDecoderLayer",
+        "Qwen2DecoderLayer",
+    }:
+        specs = qwen2vl_specs
+    else:
+        return []
+
     return [
-        ("attention.wqkv", "attention_wqkv", "attn"),
-        ("attention.wo", "attention_wo", "attn"),
-        ("feed_forward.w1", "mlp_w1", "mlp"),
-        ("feed_forward.w3", "mlp_w3", "mlp"),
-        ("feed_forward.w2", "mlp_w2", "mlp"),
+        (
+            module_name,
+            module_type,
+            grouped_family if reweight_group else legacy_family,
+        )
+        for module_name, module_type, grouped_family, legacy_family in specs
     ]
 
 
@@ -137,7 +174,7 @@ def _compute_multimodal_activation_aware_score(
 
 
 @torch.no_grad()
-def _collect_internvl2_linear_scores(
+def _collect_linear_scores(
     layer,
     layer_name,
     input_feat,
@@ -150,7 +187,10 @@ def _collect_internvl2_linear_scores(
     emit_timing=False,
 ):
     candidates = []
-    if layer.__class__.__name__ != "InternLM2DecoderLayer":
+    candidate_specs = _get_linear_candidate_specs(
+        layer, reweight_group=reweight_group
+    )
+    if not candidate_specs:
         return candidates
 
     timing = {
@@ -162,9 +202,7 @@ def _collect_internvl2_linear_scores(
     }
     call_start = time.perf_counter()
 
-    for module_name, module_type, module_family in _get_internvl2_candidate_specs(
-        reweight_group=reweight_group
-    ):
+    for module_name, module_type, module_family in candidate_specs:
         if module_name not in input_feat:
             continue
 
@@ -227,6 +265,10 @@ def _collect_internvl2_linear_scores(
 
     return candidates
 
+
+@torch.no_grad()
+def _collect_internvl2_linear_scores(*args, **kwargs):
+    return _collect_linear_scores(*args, **kwargs)
 
 
 
@@ -748,8 +790,11 @@ def get_blocks(model):
         layers = model.model.layers
     elif model.__class__.__name__ == "InternVLChatModel":
         layers = model.language_model.model.layers
-    elif model.__class__.__name__ == "Qwen2VLForConditionalGeneration":
-        layers = model.model.layers
+    elif model.__class__.__name__ in {
+        "Qwen2VLForConditionalGeneration",
+        "Qwen2_5_VLForConditionalGeneration",
+    }:
+        layers = model.model.language_model.layers
     elif model.__class__.__name__ == "LlavaLlamaModel":
         layers = model.llm.model.layers
     elif isinstance(model, OPTForCausalLM):
@@ -770,6 +815,31 @@ def get_blocks(model):
 
 
 # MBQ:增加一些qwen2vl,llava的处理模块
+def _move_internvl_chat_embeddings(model, device):
+    """Move an InternVL chat model's text embeddings for either LM backbone.
+
+    InternVL2 wraps InternLM2, whose token embedding is ``tok_embeddings``.
+    InternVL3 keeps the same outer ``InternVLChatModel`` but wraps Qwen2, whose
+    token embedding is ``embed_tokens``.  Keeping the distinction here avoids
+    routing InternVL3 through an InternLM2-only assumption.
+    """
+    language_model = model.language_model
+    text_model = getattr(language_model, "model", language_model)
+
+    if hasattr(text_model, "tok_embeddings"):
+        text_model.tok_embeddings = text_model.tok_embeddings.to(device)
+    elif hasattr(text_model, "embed_tokens"):
+        text_model.embed_tokens = text_model.embed_tokens.to(device)
+    else:
+        raise AttributeError(
+            "Unsupported InternVL language backbone: expected ``tok_embeddings`` "
+            "or ``embed_tokens`` on language_model.model."
+        )
+
+    if hasattr(text_model, "rotary_emb"):
+        text_model.rotary_emb = text_model.rotary_emb.to(device)
+
+
 def move_embed(model, device):
     if isinstance(model, LlamaForCausalLM):
         model.model.embed_tokens = model.model.embed_tokens.to(device)
@@ -806,11 +876,15 @@ def move_embed(model, device):
     elif model.__class__.__name__ == "InternLM2ForCausalLM":
         model.model.tok_embeddings = model.model.tok_embeddings.to(device)
     elif model.__class__.__name__ == "InternVLChatModel":
-        model.language_model.model.tok_embeddings = (
-            model.language_model.model.tok_embeddings.to(device)
-        )
-    elif model.__class__.__name__ == "Qwen2VLForConditionalGeneration":
-        model.model.embed_tokens = model.model.embed_tokens.to(device)
+        _move_internvl_chat_embeddings(model, device)
+    elif model.__class__.__name__ in {
+        "Qwen2VLForConditionalGeneration",
+        "Qwen2_5_VLForConditionalGeneration",
+    }:
+        language_model = model.model.language_model
+        language_model.embed_tokens = language_model.embed_tokens.to(device)
+        if hasattr(language_model, "rotary_emb"):
+            language_model.rotary_emb = language_model.rotary_emb.to(device)
     elif model.__class__.__name__ == "LlavaLlamaModel":
         model.llm.model.embed_tokens = model.llm.model.embed_tokens.to(device)
     else:
@@ -895,6 +969,33 @@ def _save_reweight_cache(reweight_cache_path: Optional[str], reweight_cache: dic
     torch.save(reweight_cache, reweight_cache_path)
 
 
+def _clear_model_gradients(model):
+    """Release parameter gradients after backward hooks have recorded their statistics."""
+    model.model.zero_grad(set_to_none=True)
+
+
+def _extract_layer_hidden_states(layer_output):
+    """Return decoder hidden states across the Transformers layer-output APIs.
+
+    Older decoder implementations return a tuple whose first element is the
+    hidden-state tensor.  Recent ``Qwen2DecoderLayer`` implementations return
+    that tensor directly.  Indexing a direct tensor with ``[0]`` silently
+    drops the batch dimension, which only surfaces at the next layer when its
+    batched RoPE embeddings can no longer broadcast.  Keep tuple compatibility
+    without treating a tensor as a sequence.
+    """
+    if isinstance(layer_output, torch.Tensor):
+        return layer_output
+    if isinstance(layer_output, (tuple, list)):
+        if not layer_output:
+            raise ValueError("Decoder layer returned an empty output sequence.")
+        return layer_output[0]
+    raise TypeError(
+        "Unsupported decoder layer output type: "
+        f"{type(layer_output).__name__}. Expected a Tensor, tuple, or list."
+    )
+
+
 @torch.no_grad()
 def run_mbq(
     model,
@@ -938,6 +1039,16 @@ def run_mbq(
         def __init__(self, module):
             super().__init__()
             self.module = module
+            # Copy non-parameter, non-tensor instance attributes from the
+            # original module (e.g., Qwen2.5 VL's decoder_layer.attention_type)
+            # so the outer forward loop can access them on this wrapper.
+            for key in module.__dict__:
+                if key.startswith("_"):
+                    continue
+                val = module.__dict__[key]
+                if callable(val) or isinstance(val, (nn.Module, nn.Parameter, torch.Tensor)):
+                    continue
+                setattr(self, key, val)
 
         def forward(self, inp, **kwargs):
             inps.append(inp)
@@ -1042,6 +1153,7 @@ def run_mbq(
                 mini_batch = 1
                 total_samples = next(iter(prompt_inputs.values())).shape[0]
                 accum_steps = int(total_samples / mini_batch)
+                _clear_model_gradients(model)
 
                 for i in tqdm.tqdm(
                     range(0, total_samples, mini_batch),
@@ -1058,6 +1170,8 @@ def run_mbq(
 
                     loss = loss / accum_steps
                     loss.backward()
+                    _clear_model_gradients(model)
+                    del loss, outputs, mini_inputs
 
             model.to_cpu()
             grad_avg_dict = grad_cache.get_avg_grad_dict()
@@ -1114,7 +1228,7 @@ def run_mbq(
             if isinstance(layer_kwargs[k], torch.Tensor):
                 layer_kwargs[k] = layer_kwargs[k].to(next(layer.parameters()).device)
         # ========新增结束
-        inps = layer(inps, **layer_kwargs)[0]
+        inps = _extract_layer_hidden_states(layer(inps, **layer_kwargs))
         for h in handles:
             h.remove()
 
@@ -1260,7 +1374,7 @@ def run_mbq(
 
             if (use_low_rank or linear_mixed_probe) :
                 layer_name = get_op_name(model.model, layer)
-                layer_linear_scores = _collect_internvl2_linear_scores(
+                layer_linear_scores = _collect_linear_scores(
                     layer=layer,
                     layer_name=layer_name,
                     input_feat=input_feat,
@@ -1307,7 +1421,9 @@ def run_mbq(
                     inps_distort = inps_distort.to(
                         next(layer_q.parameters()).device
                     )  # in case multi-gpu
-                    inps_distort = layer_q(inps_distort, **layer_kwargs)[0]
+                    inps_distort = _extract_layer_hidden_states(
+                        layer_q(inps_distort, **layer_kwargs)
+                    )
                     del layer_q
                 else:
                     layer_q = copy.deepcopy(layer)
@@ -1322,7 +1438,9 @@ def run_mbq(
                     inps_distort = inps_distort.to(
                         next(layer_q.parameters()).device
                     )  # in case multi-gpu
-                    inps_distort = layer_q(inps_distort, **layer_kwargs)[0]
+                    inps_distort = _extract_layer_hidden_states(
+                        layer_q(inps_distort, **layer_kwargs)
+                    )
                     del layer_q
             # ===========新增结束
             # append prefix to make names global

@@ -20,6 +20,7 @@ try:
     from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLCausalLMOutputWithPast
 except ImportError:
     print("Failed to import qwen2_vl; Please update it transformers to 4.45.0`")
+    Qwen2VLCausalLMOutputWithPast = CausalLMOutputWithPast
 
 from PIL import Image, ImageFile, PngImagePlugin, UnidentifiedImageError
 
@@ -30,6 +31,29 @@ try:
     from qwen_vl_utils import process_vision_info
 except ImportError:
     print("Failed to import qwen_vl_utils; Please install it via `pip install qwen-vl-utils`")
+
+
+def _get_language_model(model):
+    core_model = getattr(model, "model", None)
+    if core_model is not None and hasattr(core_model, "language_model"):
+        return core_model.language_model
+    return core_model
+
+
+def _get_input_embeddings(model):
+    if hasattr(model, "get_input_embeddings"):
+        return model.get_input_embeddings()
+    language_model = _get_language_model(model)
+    return language_model.embed_tokens
+
+
+def _get_visual_dtype(visual):
+    if hasattr(visual, "get_dtype"):
+        return visual.get_dtype()
+    if hasattr(visual, "dtype"):
+        return visual.dtype
+    return next(visual.parameters()).dtype
+
 
 @MODEL_REGISTRY.register("qwen2_vl")
 class Qwen2_VL(BaseModel):
@@ -42,13 +66,13 @@ class Qwen2_VL(BaseModel):
         self.device_map = getattr(model, 'hf_device_map', {})
 
     def fetch_vit(self):
-        return self.model.vision_model
+        return self.model.visual
 
     def fetch_llm(self):
-        return self.model.language_model
+        return _get_language_model(self.model)
 
     def fetch_proj(self):
-        return self.model.mlp1
+        return getattr(self.fetch_vit(), "merger", None)
 
     def vision_preprocess(self, image):
         pass
@@ -69,7 +93,8 @@ class Qwen2_VL(BaseModel):
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError('You cannot specify both input_ids and inputs_embeds at the same time')
 
-        outputs = self.model.model(
+        language_model = self.fetch_llm()
+        outputs = language_model(
             input_ids=input_ids.to(next(self.model.parameters()).device) if input_ids is not None else None,
             attention_mask=attention_mask.to(next(self.model.parameters()).device) if attention_mask is not None else None,
             inputs_embeds=inputs_embeds.to(next(self.model.parameters()).device) if inputs_embeds is not None else None,
@@ -98,14 +123,19 @@ class Qwen2_VL(BaseModel):
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return Qwen2VLCausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-            rope_deltas=None,
-        )
+        output_kwargs = {
+            "loss": loss,
+            "logits": logits,
+            "past_key_values": outputs.past_key_values,
+            "hidden_states": outputs.hidden_states,
+            "attentions": outputs.attentions,
+            "rope_deltas": getattr(outputs, "rope_deltas", None),
+        }
+        try:
+            return Qwen2VLCausalLMOutputWithPast(**output_kwargs)
+        except TypeError:
+            output_kwargs.pop("rope_deltas", None)
+            return CausalLMOutputWithPast(**output_kwargs)
 
 
     def to_cuda(self):
@@ -314,9 +344,10 @@ class Qwen2_VL(BaseModel):
 
         # generate input embeddings
         # copied from the Qwen2VLForConditionalGeneration.forward
-        inputs_embeds = self.model.model.embed_tokens(input_ids) 
-        pixel_values = pixel_values.type(self.model.visual.get_dtype())
-        image_embeds = self.model.visual(pixel_values, grid_thw=image_grid_thw)
+        inputs_embeds = _get_input_embeddings(self.model)(input_ids)
+        visual = self.fetch_vit()
+        pixel_values = pixel_values.type(_get_visual_dtype(visual))
+        image_embeds = visual(pixel_values, grid_thw=image_grid_thw)
         image_mask = (input_ids == self.model.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
         image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
@@ -384,16 +415,19 @@ class Qwen2_VL(BaseModel):
                     batch[k] = torch.tensor(np.stack([f[k] for f in instances]))
                 else:
                     batch[k] = torch.tensor([f[k] for f in instances])
-            if k in ('pixel_values'):
+            if k == 'pixel_values':
                 if isinstance(v, torch.Tensor):
                     batch[k] = torch.concat([f[k] for f in instances])
                 elif isinstance(v, np.ndarray):
                     batch[k] = torch.concat(np.stack([f[k] for f in instances]))
                 else:
                     batch[k] = torch.concat([f[k] for f in instances])
-            if k in ('image_grid_thw'):
+            if k == 'image_grid_thw':
                 if isinstance(v, torch.Tensor):
                     batch[k] = torch.stack([f[k] for f in instances])
-            if k in ('sample_id'):
+            if k == 'sample_id':
                 batch[k] = [f[k] for f in instances]
         return batch
+
+
+MODEL_REGISTRY.register("qwen2_5_vl")(Qwen2_VL)

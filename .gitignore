@@ -177,3 +177,7 @@ outputs/
 
 AAAA-2026/*
 data/*
+
+act_for_ck/*
+
+.agents/*

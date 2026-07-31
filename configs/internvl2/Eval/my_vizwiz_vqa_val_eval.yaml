@@ -1,0 +1,50 @@
+batch_size: 1
+distort: false
+double_quant: true
+double_quant_config:
+  scale_bit: 4
+  scale_group: 32
+  zero_point: true
+linear_mixed_config:
+  high_bit: 3
+  keep_ratio: 0.3
+linear_mixed_probe: true
+log_samples: true
+log_samples_suffix: vizwiz_vqa_val
+loss_mode: mae
+low_rank: true
+low_rank_config:
+  attn_topk_ratio: 1.0
+  mlp_topk_ratio: 1.0
+  rank: 128
+method: mbq
+model: internvl2
+model_args: pretrained=OpenGVLab/InternVL2-8B
+output_path: outputs/my-internvl2-8b/vizwiz_vqa_val/internvl2_8b_w2g32_scale_reweight_true_svd_1.0_mixed_0.3
+pseudo_quant: true
+reweight: true
+reweight_cache_path: scale_cache/mbq/reweight/internvl2_8b_reweight.pt
+reweight_group: true
+run_process: false
+scale_path: scale_cache/mbq/internvl2_8b_w2g32_scale_reweight_true_svd_1.0_mixed_0.3.pt
+scale_search_config:
+  act_stat: modality_mean
+  act_stat_candidates:
+  - token_weighted
+  - modality_mean
+  loss_reduction: modality_mean
+svd_quant: true
+svd_quant_config:
+  down:
+    quant_axis: in_channel
+    quant_bit: 4
+    weight_quant: per_channel
+    zero_point: false
+  up:
+    quant_axis: out_channel
+    quant_bit: 4
+    weight_quant: per_channel
+    zero_point: false
+tasks: vizwiz_vqa_val
+w_bit: 2
+w_group: 32

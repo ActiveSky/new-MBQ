@@ -186,7 +186,7 @@ def smooth_lm(model, scales, alpha=0.5):
             fcs_input_scales = scales[name + ".feed_forward.w1"]
 
             smooth_ln_fcs_llama_like(ffn_ln, fcs, fcs_input_scales, alpha)
-        elif module.__class__.__name__ == "Qwen2VLDecoderLayer":
+        elif module.__class__.__name__ in {"Qwen2VLDecoderLayer", "Qwen2_5_VLDecoderLayer"}:
             attn_ln = module.input_layernorm  # attention forward norm
             qkv = [
                 module.self_attn.q_proj,

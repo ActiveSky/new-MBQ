@@ -6,10 +6,13 @@ import hf_transfer
 from loguru import logger
 
 from qmllm.models.internvl2 import InternVL2
+from qmllm.models.internvl3 import InternVL3
 from qmllm.models.llava_onevision import LLaVA_onevision
 from qmllm.models.llava_v15 import LLaVA_v15
 from qmllm.models.qwen2_vl import Qwen2_VL
-from qmllm.models.vila import vila
+# VILA requires the optional `llava` package. Keep Qwen/InternVL imports usable
+# when LLaVA is intentionally not installed.
+# from qmllm.models.vila import vila
 
 from qmllm.utils.registry import MODEL_REGISTRY
 
